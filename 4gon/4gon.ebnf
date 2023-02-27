@@ -1,0 +1,25 @@
+delimited_expression
+	= name
+	| integer
+	| "(", expression, ")"
+	| delimited_expression, "?", "yes", "|", expression, "no", "|", expression, ";"
+	| "(", expression, ",", expression, ")"
+	| "<", name, type, ">", expression, ";"
+	| name, "!", "<", name, type, ">", expression, ";"
+	;
+
+expression
+	= delimited_expression
+	| expression, delimited_expression
+	;
+
+delimited_type
+	= "int"
+	| "bool"
+	| "(", type, ")"
+	| "(", type, ",", type, ")";
+
+type
+	= delimited_type
+	| delimited_type, "->", type
+	;
