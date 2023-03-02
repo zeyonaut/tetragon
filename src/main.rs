@@ -111,5 +111,5 @@ fn main() {
 		Any,
 	}
 
-	lalr1_parser.parse(lexer, |_| Expr::Any);
+	lalr1_parser.parse(lexer, |_| Expr::Any).unwrap();
 }

@@ -7,7 +7,7 @@ use std::{
 
 use thiserror::Error;
 
-use crate::{grammar::*, lexer::LexError, pow::*, slice::Slice, terminal::HasTerminal, fix::fix, *};
+use crate::{fix::fix, grammar::*, lexer::LexError, pow::*, slice::Slice, terminal::HasTerminal, *};
 
 // An LR(1) item is an LR(0) item with an additional sentinel;
 // Successful completion requires that the sentinel is observed.
@@ -229,15 +229,15 @@ where
 
 #[derive(Error, Debug, PartialEq)]
 pub enum GenerateParserError {
-	#[error("encountered a reduce-reduce ambiguity when generating an LALR(1) parser")]
+	#[error("encountered reduce-reduce ambiguity when generating LALR(1) parser")]
 	ReduceReduce,
-	#[error("encountered a shift-reduce ambiguity when generating an LALR(1) parser")]
+	#[error("encountered shift-reduce ambiguity when generating LALR(1) parser")]
 	ShiftReduce,
 	// I'm pretty sure shift-shift ambiguities can't be encountered, but this error is included for completion.
-	#[error("encountered a shift-shift ambiguity when generating an LALR(1) parser")]
+	#[error("encountered shift-shift ambiguity when generating LALR(1) parser")]
 	ShiftShift,
 	// I'm also pretty sure this can never occur, but I'm including it anyway.
-	#[error("encountered a missing state when generating an LALR(1) parser")]
+	#[error("encountered missing state when generating LALR(1) parser")]
 	MissingState,
 }
 
@@ -245,7 +245,22 @@ pub enum GenerateParserError {
 pub enum ParseError<X: Error> {
 	#[error(transparent)]
 	LexError(#[from] X),
-	Something,
+	#[error("ran out of states unexpectedly")]
+	DepletedStateStack,
+	#[error("a state in the state stack was invalid (this should never occur!)")]
+	InvalidState,
+	#[error("encountered a reduce action with a start target (this should never occur!)")]
+	EarlyAcceptance,
+	#[error("encountered unexpected terminal while parsing")]
+	UnexpectedTerminal,
+	#[error("encountered unexpected nonterminal while parsing")]
+	UnexpectedNonterminal,
+	#[error("encountered unexpected end of input while parsing")]
+	UnexpectedEndOfInput,
+	#[error("encountered production with pattern of greater length than current state or expression stack")]
+	OverlongReduction,
+	#[error("parsing finished without reducing start production")]
+	FailedReturn,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -374,20 +389,20 @@ where
 			let goto_table = pow![
 				nonterminal => {
 					let lalr1_items: BTreeSet<_> = State::new(lalr1_span.clone())
-					.step(
-						grammar,
-						Symbol::Nonterminal(nonterminal)
-					)
-					.items
-					.iter()
-					.map(Item::item)
-					.cloned()
-					.collect();
+						.step(
+							grammar,
+							Symbol::Nonterminal(nonterminal)
+						)
+						.items
+						.iter()
+						.map(Item::item)
+						.cloned()
+						.collect();
 
 					let lr0_basis = lr0::State::new(lalr1_items).summarize().items().clone();
 
 					if lr0_basis.len() > 0 {
-						Some(index_of_basis.get(&lr0_basis).copied().unwrap())
+						index_of_basis.get(&lr0_basis).copied()
 					} else {
 						None
 					}
@@ -433,19 +448,18 @@ where
 		L: Debug,
 		E: Debug,
 	{
+		use ParseError::*;
 		let mut states = vec![self.initial_state];
 		let mut expressions: Vec<Symbol<(N, E), L>> = vec![];
 
 		while let Some(token) = lexer.next() {
 			if let Ok(token) = token {
 				'token: loop {
-					let state = states.last().expect("Ran out of states unexpectedly.");
-					let table = self.table_by_state.get(*state).expect(
-						"A state in the state stack was invalid. This should never occur if table generation was correct!",
-					);
+					let state = states.last().ok_or(DepletedStateStack)?;
+					let table = self.table_by_state.get(*state).ok_or(InvalidState)?;
 					let action = table.action[token.terminal()]
 						.as_ref()
-						.unwrap_or_else(|| panic!("Unexpected terminal encountered: {:#?}\nExisting actions: {:#?}\nExpression stack: {:#?},\nstate: {:#?}", token, table.action, expressions, table.state));
+						.ok_or(UnexpectedTerminal)?;
 					match action {
 						Action::Shift(next_state) => {
 							states.push(*next_state);
@@ -457,27 +471,22 @@ where
 							let next_length = states
 								.len()
 								.checked_sub(production.pattern().len())
-								.expect("Encountered production with pattern of greater length than the current state stack.");
+								.ok_or(OverlongReduction)?;
 							states.truncate(next_length);
 
-							let state = states.last().expect("Ran out of states unexpectedly.");
+							let state = states.last().ok_or(DepletedStateStack)?;
 							let table = self
 								.table_by_state
 								.get(*state)
-								.expect("A state in the state stack was invalid. This should never occur if table generation was correct!");
-							let next_length = expressions.len().checked_sub(production.pattern().len()).expect(
-								"Encountered production with pattern of greater length than the current expression stack.",
-							);
+								.ok_or(InvalidState)?;
+							let next_length = expressions.len().checked_sub(production.pattern().len()).ok_or(OverlongReduction)?;
 
 							let next_expression = produce(expressions.drain(next_length..).as_slice());
-							if let Some(nonterminal) = production.target() {
-								let next_state = table.goto[nonterminal.clone()].expect("Invalid goto reached.");
-								states.push(next_state);
-								expressions.push(Symbol::Nonterminal((nonterminal.clone(), next_expression)));
-							} else {
-								// FIXME: This really bothers me, as if the reduction is called when encountering a terminal which is not the end symbol, then the target of the production can never be the start symbol.
-								panic!("We encountered a reduce action with a start target. This shold never happen!")
-							}
+							// FIXME: This really bothers me, as if the reduction is called when encountering a terminal which is not the end symbol, then the target of the production can never be the start symbol.
+							let nonterminal = production.target().ok_or(EarlyAcceptance)?;
+							let next_state = table.goto[nonterminal.clone()].ok_or(UnexpectedNonterminal)?;
+							states.push(next_state);
+							expressions.push(Symbol::Nonterminal((nonterminal.clone(), next_expression)));
 						},
 					}
 				}
@@ -490,49 +499,46 @@ where
 			let table = self
 				.table_by_state
 				.get(*state)
-				.expect("A state in the state stack was invalid. This should never occur if table generation was correct!");
+				.ok_or(InvalidState)?;
 			let production = table
 				.reduction
 				.as_ref()
-				.unwrap_or_else(|| panic!("Unexpected end of input encountered.\nCurrent table: {:#?}", table.state));
+				.ok_or(UnexpectedEndOfInput)?;
 			let next_length = states
 				.len()
 				.checked_sub(production.pattern().len())
-				.expect("Encountered production with pattern of greater length than the current state stack.");
+				.ok_or(OverlongReduction)?;
 			states.truncate(next_length);
 
-			let state = states.last().expect("Ran out of states unexpectedly.");
+			let state = states.last().ok_or(DepletedStateStack)?;
 			let table = self
 				.table_by_state
 				.get(*state)
-				.expect("A state in the state stack was invalid. This should never occur if table generation was correct!");
+				.ok_or(InvalidState)?;
 
 			let next_length = expressions
 				.len()
 				.checked_sub(production.pattern().len())
-				.expect("Encountered production with pattern of greater length than the current expression stack.");
-			let drainage = expressions.drain(next_length..).collect::<Vec<_>>();
-
-			let next_expression = produce(drainage.as_slice());
+				.ok_or(OverlongReduction)?;
+			let next_expression = produce(expressions.drain(next_length..).as_slice());
 
 			if let Some(nonterminal) = production.target() {
 				let next_state = table.goto[nonterminal.clone()]
-					.unwrap_or_else(|| panic!("Invalid goto reached. Nonterminal: {:#?}", nonterminal.clone()));
+					.ok_or(UnexpectedNonterminal)?;
 				states.push(next_state);
 				expressions.push(Symbol::Nonterminal((nonterminal.clone(), next_expression)));
 			} else {
 				return Ok(next_expression);
 			}
-		}
-
-		panic!("Parsing ended without reducing by the start production.");
+		}	
+		Err(FailedReturn)
 	}
 }
 
 mod tests {
 	use enum_iterator::Sequence;
 
-	use crate::{*, lalr1::GenerateParserError};
+	use crate::{lalr1::GenerateParserError, *};
 
 	// Figure 4.47, p. 275
 	#[test]
