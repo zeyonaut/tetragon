@@ -2,7 +2,12 @@ use std::{cmp::min, collections::BTreeSet, fmt::Debug};
 
 use enum_iterator::{all, Sequence};
 
-use crate::{grammar::*, pow::*, slice::Slice, fix::fix};
+use crate::{
+	fix::fix,
+	grammar::*,
+	pow::*,
+	slice::{slice, Slice},
+};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Item<N, T> {

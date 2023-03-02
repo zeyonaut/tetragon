@@ -17,33 +17,27 @@
 #[macro_use]
 extern crate maplit;
 
-mod fix;
-#[macro_use]
-mod pow;
-#[macro_use]
-mod slice;
-
-#[macro_use]
-mod terminal;
-
-mod lexer;
-
-#[macro_use]
-mod grammar;
-#[macro_use]
-mod lr0;
-#[macro_use]
-mod lalr1;
+#[path = "generator/_.rs"]
+mod generator;
+#[path = "parser/_.rs"]
+mod parser;
+#[path = "util/_.rs"]
+mod util;
 
 use std::mem::size_of;
 
 use enum_iterator::Sequence;
+use generator::*;
 use grammar::*;
 use lexer::Lexer;
+use parser::*;
+use pow::{impl_downset_for_repr_enum, pow};
+use slice::slice;
+use util::*;
 
 fn main() {
 	let lexer = Lexer::new(include_str!("../tetra/fib.tetra"));
-	
+
 	#[derive(Debug, Sequence, Clone, Copy, PartialOrd, Ord, Eq, PartialEq)]
 	#[repr(u8)]
 	enum Nonterminal {
@@ -60,8 +54,8 @@ fn main() {
 
 	impl_downset_for_repr_enum![Nonterminal ~ u8];
 
-	use Nonterminal::*;
 	use lexer::Terminal::*;
+	use Nonterminal::*;
 
 	let grammar = grammar![
 		Value;

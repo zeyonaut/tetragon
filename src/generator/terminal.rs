@@ -38,13 +38,13 @@ macro_rules! create_token_and_terminal_types {
 	} => {
 		$(#[$attr_token])*
 		$pub_token enum $TokenTypeName {
-			$($VariantName $(($($Type),*))?),*	
+			$($VariantName $(($($Type),*))?),*
 		}
 
 		$(#[$attr_terminal])*
 		#[repr($repr)]
 		$pub_terminal enum $TerminalTypeName {
-			$($VariantName),*	
+			$($VariantName),*
 		}
 
 		impl HasTerminal<$TerminalTypeName> for $TokenTypeName {
@@ -58,3 +58,4 @@ macro_rules! create_token_and_terminal_types {
 		}
 	};
 }
+pub(crate) use create_token_and_terminal_types;

@@ -7,7 +7,15 @@ use std::{
 
 use thiserror::Error;
 
-use crate::{fix::fix, grammar::*, lexer::LexError, pow::*, slice::Slice, terminal::HasTerminal, *};
+use crate::{
+	fix::fix,
+	grammar::*,
+	lexer::LexError,
+	pow::*,
+	slice::{slice, Slice},
+	terminal::HasTerminal,
+	*,
+};
 
 // An LR(1) item is an LR(0) item with an additional sentinel;
 // Successful completion requires that the sentinel is observed.
@@ -75,7 +83,7 @@ macro_rules! lr1_item {
 
 	// Entry
 	[$cursor:expr; $target:tt -> $($kind:tt $symbol:expr),* $(,)?; $sentinel:tt] => (
-		$crate::lalr1::Item::new($crate::lr0::Item::new_at($crate::grammar::Production::new(lr1_item![@target $target], slice![$(lr1_item![@symbol $kind $symbol]),*]), $cursor), lr1_item![@target $sentinel])
+		$crate::generator::lalr1::Item::new($crate::generator::lr0::Item::new_at($crate::generator::grammar::Production::new(lr1_item![@target $target], slice![$(lr1_item![@symbol $kind $symbol]),*]), $cursor), lr1_item![@target $sentinel])
 	);
 }
 
@@ -457,9 +465,7 @@ where
 				'token: loop {
 					let state = states.last().ok_or(DepletedStateStack)?;
 					let table = self.table_by_state.get(*state).ok_or(InvalidState)?;
-					let action = table.action[token.terminal()]
-						.as_ref()
-						.ok_or(UnexpectedTerminal)?;
+					let action = table.action[token.terminal()].as_ref().ok_or(UnexpectedTerminal)?;
 					match action {
 						Action::Shift(next_state) => {
 							states.push(*next_state);
@@ -475,11 +481,11 @@ where
 							states.truncate(next_length);
 
 							let state = states.last().ok_or(DepletedStateStack)?;
-							let table = self
-								.table_by_state
-								.get(*state)
-								.ok_or(InvalidState)?;
-							let next_length = expressions.len().checked_sub(production.pattern().len()).ok_or(OverlongReduction)?;
+							let table = self.table_by_state.get(*state).ok_or(InvalidState)?;
+							let next_length = expressions
+								.len()
+								.checked_sub(production.pattern().len())
+								.ok_or(OverlongReduction)?;
 
 							let next_expression = produce(expressions.drain(next_length..).as_slice());
 							// FIXME: This really bothers me, as if the reduction is called when encountering a terminal which is not the end symbol, then the target of the production can never be the start symbol.
@@ -496,14 +502,8 @@ where
 		}
 
 		while let Some(state) = states.last() {
-			let table = self
-				.table_by_state
-				.get(*state)
-				.ok_or(InvalidState)?;
-			let production = table
-				.reduction
-				.as_ref()
-				.ok_or(UnexpectedEndOfInput)?;
+			let table = self.table_by_state.get(*state).ok_or(InvalidState)?;
+			let production = table.reduction.as_ref().ok_or(UnexpectedEndOfInput)?;
 			let next_length = states
 				.len()
 				.checked_sub(production.pattern().len())
@@ -511,10 +511,7 @@ where
 			states.truncate(next_length);
 
 			let state = states.last().ok_or(DepletedStateStack)?;
-			let table = self
-				.table_by_state
-				.get(*state)
-				.ok_or(InvalidState)?;
+			let table = self.table_by_state.get(*state).ok_or(InvalidState)?;
 
 			let next_length = expressions
 				.len()
@@ -523,14 +520,13 @@ where
 			let next_expression = produce(expressions.drain(next_length..).as_slice());
 
 			if let Some(nonterminal) = production.target() {
-				let next_state = table.goto[nonterminal.clone()]
-					.ok_or(UnexpectedNonterminal)?;
+				let next_state = table.goto[nonterminal.clone()].ok_or(UnexpectedNonterminal)?;
 				states.push(next_state);
 				expressions.push(Symbol::Nonterminal((nonterminal.clone(), next_expression)));
 			} else {
 				return Ok(next_expression);
 			}
-		}	
+		}
 		Err(FailedReturn)
 	}
 }
@@ -538,7 +534,7 @@ where
 mod tests {
 	use enum_iterator::Sequence;
 
-	use crate::{lalr1::GenerateParserError, *};
+	use crate::{lalr1::*, *};
 
 	// Figure 4.47, p. 275
 	#[test]

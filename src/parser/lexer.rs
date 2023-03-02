@@ -1,9 +1,9 @@
-use std::{iter::Peekable, str::Chars, backtrace::Backtrace};
+use std::{backtrace::Backtrace, iter::Peekable, str::Chars};
 
 use enum_iterator::Sequence;
 use thiserror::Error;
 
-use crate::terminal::*;
+use crate::{generator::terminal::*, util::pow::impl_downset_for_repr_enum};
 
 create_token_and_terminal_types! {
 	#[derive(Debug)]
@@ -59,7 +59,7 @@ impl<'source> Scanner<'source> {
 			x
 		})
 	}
-	
+
 	fn next_if(&mut self, func: impl FnOnce(&char) -> bool) -> Option<char> {
 		self.chars.next_if(func).map(|x| {
 			self.increment_counters(x);
@@ -84,11 +84,7 @@ pub enum LexError {
 	#[error(transparent)]
 	ParseIntError(#[from] core::num::ParseIntError),
 	#[error("encountered unknown lexeme '{}' at {}:{}", .lexeme, .line, .offset)]
-	UnknownLexeme{
-		lexeme: String,
-		line: usize,
-		offset: usize,
-	}
+	UnknownLexeme { lexeme: String, line: usize, offset: usize },
 }
 
 /// Takes a first character and a peekable stream of characters and produces a token representing a name.
@@ -135,8 +131,8 @@ impl<'source> Iterator for Lexer<'source> {
 	type Item = Result<Token, LexError>;
 
 	fn next(&mut self) -> Option<Self::Item> {
-		use Token::*;
 		use LexError::*;
+		use Token::*;
 		while self.scanner.next_if(|&x| x.is_ascii_whitespace()).is_some() {}
 		Some(match self.scanner.next()? {
 			'@' => Ok(Arrova),
@@ -146,24 +142,32 @@ impl<'source> Iterator for Lexer<'source> {
 				.map(|_| Ok(Arrow))
 				.unwrap_or_else(|| lex_integer('-', &mut self.scanner)),
 			'|' => Ok(Bar),
-			':' => self
-				.scanner
-				.next_if_eq(&':')
-				.map(|_| Ok(Bicolon))
-				.unwrap_or_else(|| Err(UnknownLexeme { lexeme: ":".to_owned(), line: self.line(), offset: self.offset()})),
+			':' => self.scanner.next_if_eq(&':').map(|_| Ok(Bicolon)).unwrap_or_else(|| {
+				Err(UnknownLexeme {
+					lexeme: ":".to_owned(),
+					line: self.line(),
+					offset: self.offset(),
+				})
+			}),
 			'}' => Ok(CloseCurly),
 			']' => Ok(CloseOrtho),
-			'=' => self
-				.scanner
-				.next_if_eq(&'?')
-				.map(|_| Ok(EqualsQuestion))
-				.unwrap_or_else(|| Err(UnknownLexeme { lexeme: "=".to_owned(), line: self.line(), offset: self.offset()}) ),
+			'=' => self.scanner.next_if_eq(&'?').map(|_| Ok(EqualsQuestion)).unwrap_or_else(|| {
+				Err(UnknownLexeme {
+					lexeme: "=".to_owned(),
+					line: self.line(),
+					offset: self.offset(),
+				})
+			}),
 			'{' => Ok(OpenCurly),
 			'[' => Ok(OpenOrtho),
 			'?' => Ok(Question),
 			x if x.is_ascii_alphabetic() => Ok(lex_name(x, &mut self.scanner)),
 			x if x.is_ascii_digit() || x == '+' => lex_integer(x, &mut self.scanner),
-			x => Err(UnknownLexeme { lexeme: String::from(x), line: self.line(), offset: self.offset()}),
+			x => Err(UnknownLexeme {
+				lexeme: String::from(x),
+				line: self.line(),
+				offset: self.offset(),
+			}),
 		})
 	}
 }

@@ -8,3 +8,4 @@ macro_rules! slice {
 		vec![$($x),*].into_boxed_slice()
 	});
 }
+pub(crate) use slice;

@@ -2,7 +2,7 @@ use std::{cmp::min, collections::BTreeSet};
 
 use enum_iterator::{all, Sequence};
 
-use crate::{pow::*, slice::Slice, fix::fix};
+use crate::util::{fix::fix, pow::*, slice::*};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Sequence)]
 pub enum Symbol<N, T> {
@@ -75,12 +75,10 @@ where
 	}
 
 	pub fn productions_of<'g>(&'g self, target: N) -> impl Iterator<Item = Production<N, T>> + 'g {
-		self.patterns_of[target]
-			.iter()
-			.map(move |pattern| Production {
-				target: Some(target),
-				pattern: pattern.clone(),
-			})
+		self.patterns_of[target].iter().map(move |pattern| Production {
+			target: Some(target),
+			pattern: pattern.clone(),
+		})
 	}
 
 	pub fn start_production<'g>(&'g self) -> Production<N, T> {
@@ -135,11 +133,12 @@ macro_rules! grammar {
 
 	// Entry: Parse a list of grammar rules.
 	[$start:expr; $($key:pat => [$([$($kind:tt $symbol:expr),* $(,)?]),* $(,)?] $(,)?)*] => (
-		$crate::grammar::Grammar::new($start, pow! {
+		$crate::generator::grammar::Grammar::new($start, pow! {
 			$($key => slice![$(slice![$(grammar![@symbol $kind $symbol]),*]),*]),*
 		})
 	);
 }
+pub(crate) use grammar;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Production<N, T> {
