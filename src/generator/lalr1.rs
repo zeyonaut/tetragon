@@ -2,20 +2,12 @@ use std::{
 	collections::{BTreeMap, BTreeSet},
 	error::Error,
 	fmt::Debug,
-	iter::Peekable,
 };
 
+use enum_iterator::Sequence;
 use thiserror::Error;
 
-use crate::{
-	fix::fix,
-	grammar::*,
-	lexer::LexError,
-	pow::*,
-	slice::{slice, Slice},
-	terminal::HasTerminal,
-	*,
-};
+use crate::{fix::fix, pow::*, slice::slice, terminal::HasTerminal, util::slice::Slice, *};
 
 // An LR(1) item is an LR(0) item with an additional sentinel;
 // Successful completion requires that the sentinel is observed.
@@ -82,9 +74,10 @@ macro_rules! lr1_item {
 	};
 
 	// Entry
-	[$cursor:expr; $target:tt -> $($kind:tt $symbol:expr),* $(,)?; $sentinel:tt] => (
+	[$cursor:expr; $target:tt -> $($kind:tt $symbol:expr),* $(,)?; $sentinel:tt] => ({
+		use crate::util::slice::slice;
 		$crate::generator::lalr1::Item::new($crate::generator::lr0::Item::new_at($crate::generator::grammar::Production::new(lr1_item![@target $target], slice![$(lr1_item![@symbol $kind $symbol]),*]), $cursor), lr1_item![@target $sentinel])
-	);
+	});
 }
 
 struct State<N: Downset, T> {
@@ -448,17 +441,14 @@ where
 	pub fn parse<E, L: HasTerminal<T>, X: Error>(
 		&self,
 		mut lexer: impl Iterator<Item = Result<L, X>>,
-		mut produce: impl FnMut(&[Symbol<(N, E), L>]) -> E,
+		mut produce: impl FnMut(N, Slice<Symbol<E, L>>) -> E,
 	) -> Result<E, ParseError<X>>
 	where
-		N: Clone + Debug,
-		T: Debug,
-		L: Debug,
-		E: Debug,
+		N: Clone,
 	{
 		use ParseError::*;
 		let mut states = vec![self.initial_state];
-		let mut expressions: Vec<Symbol<(N, E), L>> = vec![];
+		let mut expressions: Vec<Symbol<E, L>> = vec![];
 
 		while let Some(token) = lexer.next() {
 			if let Ok(token) = token {
@@ -487,12 +477,15 @@ where
 								.checked_sub(production.pattern().len())
 								.ok_or(OverlongReduction)?;
 
-							let next_expression = produce(expressions.drain(next_length..).as_slice());
 							// FIXME: This really bothers me, as if the reduction is called when encountering a terminal which is not the end symbol, then the target of the production can never be the start symbol.
 							let nonterminal = production.target().ok_or(EarlyAcceptance)?;
+							let next_expression = produce(
+								nonterminal.clone(),
+								expressions.drain(next_length..).collect::<Vec<_>>().into_boxed_slice(),
+							);
 							let next_state = table.goto[nonterminal.clone()].ok_or(UnexpectedNonterminal)?;
 							states.push(next_state);
-							expressions.push(Symbol::Nonterminal((nonterminal.clone(), next_expression)));
+							expressions.push(Symbol::Nonterminal(next_expression));
 						},
 					}
 				}
@@ -517,24 +510,43 @@ where
 				.len()
 				.checked_sub(production.pattern().len())
 				.ok_or(OverlongReduction)?;
-			let next_expression = produce(expressions.drain(next_length..).as_slice());
 
 			if let Some(nonterminal) = production.target() {
+				let next_expression = produce(
+					nonterminal.clone(),
+					expressions.drain(next_length..).collect::<Vec<_>>().into_boxed_slice(),
+				);
 				let next_state = table.goto[nonterminal.clone()].ok_or(UnexpectedNonterminal)?;
 				states.push(next_state);
-				expressions.push(Symbol::Nonterminal((nonterminal.clone(), next_expression)));
+				expressions.push(Symbol::Nonterminal(next_expression));
 			} else {
-				return Ok(next_expression);
+				break;
 			}
 		}
-		Err(FailedReturn)
+
+		expressions
+			.into_iter()
+			.next()
+			.and_then(|x| match x {
+				Symbol::Nonterminal(expression) => Some(expression),
+				Symbol::Terminal(_) => None,
+			})
+			.ok_or(FailedReturn)
 	}
 }
 
 mod tests {
+	#[cfg(test)]
 	use enum_iterator::Sequence;
 
-	use crate::{lalr1::*, *};
+	#[cfg(test)]
+	use crate::{
+		generator::{
+			grammar::grammar,
+			lalr1::{self, GenerateParserError},
+		},
+		util::pow::impl_downset_for_repr_enum,
+	};
 
 	// Figure 4.47, p. 275
 	#[test]

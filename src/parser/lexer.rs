@@ -1,4 +1,4 @@
-use std::{backtrace::Backtrace, iter::Peekable, str::Chars};
+use std::{iter::Peekable, str::Chars};
 
 use enum_iterator::Sequence;
 use thiserror::Error;

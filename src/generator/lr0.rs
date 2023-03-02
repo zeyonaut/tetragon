@@ -1,13 +1,8 @@
-use std::{cmp::min, collections::BTreeSet, fmt::Debug};
+use std::{collections::BTreeSet, fmt::Debug};
 
 use enum_iterator::{all, Sequence};
 
-use crate::{
-	fix::fix,
-	grammar::*,
-	pow::*,
-	slice::{slice, Slice},
-};
+use crate::{fix::fix, grammar::*, pow::*};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Item<N, T> {
@@ -115,9 +110,10 @@ macro_rules! lr0_item {
 	};
 
 	// Entry
-	[$cursor:expr; $target:tt -> $($kind:tt $symbol:expr),* $(,)?] => (
+	[$cursor:expr; $target:tt -> $($kind:tt $symbol:expr),* $(,)?] => ({
+		use $crate::util::slice::slice;
 		$crate::lr0::Item::new_at($crate::grammar::Production::new(lr0_item![@target $target], slice![$(lr0_item![@symbol $kind $symbol]),*]), $cursor)
-	);
+	});
 }
 
 // TODO: Maybe use some sort of typestate to distinguish between spans, bases, and arbitrary states?
@@ -213,8 +209,10 @@ where
 }
 
 mod tests {
+	#[cfg(test)]
 	use enum_iterator::Sequence;
 
+	#[cfg(test)]
 	use crate::{grammar::*, lr0::*};
 
 	// Example 4.40, p. 244

@@ -1,6 +1,6 @@
-use std::{cmp::min, collections::BTreeSet};
+use std::collections::BTreeSet;
 
-use enum_iterator::{all, Sequence};
+use enum_iterator::Sequence;
 
 use crate::util::{fix::fix, pow::*, slice::*};
 
@@ -123,20 +123,21 @@ where
 macro_rules! grammar {
 	// Auxilliary: Parse a symbol marked as terminal.
 	[@symbol ! $symbol:expr] => {
-		$crate::grammar::Symbol::Terminal($symbol)
+		$crate::generator::grammar::Symbol::Terminal($symbol)
 	};
 
 	// Auxilliary: Parse a symbol marked as nonterminal.
 	[@symbol @ $symbol:expr] => {
-		$crate::grammar::Symbol::Nonterminal($symbol)
+		$crate::generator::grammar::Symbol::Nonterminal($symbol)
 	};
 
 	// Entry: Parse a list of grammar rules.
-	[$start:expr; $($key:pat => [$([$($kind:tt $symbol:expr),* $(,)?]),* $(,)?] $(,)?)*] => (
+	[$start:expr; $($key:pat => [$([$($kind:tt $symbol:expr),* $(,)?]),* $(,)?] $(,)?)*] => ({
+		use $crate::util::{pow::pow, slice::slice};
 		$crate::generator::grammar::Grammar::new($start, pow! {
 			$($key => slice![$(slice![$(grammar![@symbol $kind $symbol]),*]),*]),*
 		})
-	);
+	});
 }
 pub(crate) use grammar;
 
