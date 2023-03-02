@@ -2,7 +2,7 @@ use std::{cmp::min, collections::BTreeSet, fmt::Debug};
 
 use enum_iterator::{all, Sequence};
 
-use crate::{grammar::*, pow::*, slice::Slice, util::fix};
+use crate::{grammar::*, pow::*, slice::Slice, fix::fix};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Item<N, T> {
@@ -186,8 +186,8 @@ where
 
 	pub fn canonical_spans(grammar: &Grammar<N, T>) -> BTreeSet<Self>
 	where
-		N: Sequence + Copy + PartialEq + Eq + Ord,
-		T: Sequence + Copy + PartialEq + Eq + Ord,
+		N: Sequence + Copy + PartialEq + Eq + Ord + Debug,
+		T: Sequence + Copy + PartialEq + Eq + Ord + Debug,
 	{
 		fix(
 			&btreeset![State::new(btreeset![Item::new(grammar.start_production())]).elaborate(grammar)],

@@ -1,9 +1,13 @@
 use std::{
 	collections::{BTreeMap, BTreeSet},
+	error::Error,
 	fmt::Debug,
+	iter::Peekable,
 };
 
-use crate::{grammar::*, pow::*, slice::Slice, util::fix, *};
+use thiserror::Error;
+
+use crate::{grammar::*, lexer::LexError, pow::*, slice::Slice, terminal::HasTerminal, fix::fix, *};
 
 // An LR(1) item is an LR(0) item with an additional sentinel;
 // Successful completion requires that the sentinel is observed.
@@ -166,7 +170,7 @@ where
 			for lalr1_testing_item in lalr1_testing_span.items() {
 				if let Some(requirement) = lalr1_testing_item.item().requirement() {
 					// This computes GOTO(I, X).
-					let successor_lr0_kernel = lr0::State::new(btreeset![lr0_item.clone()])
+					let successor_lr0_kernel = lr0::State::new(lr0_kernel.clone())
 						.elaborate(grammar)
 						.step(grammar, requirement)
 						.summarize();
@@ -223,47 +227,68 @@ where
 	lalr1_kernels
 }
 
+#[derive(Error, Debug, PartialEq)]
+pub enum GenerateParserError {
+	#[error("encountered a reduce-reduce ambiguity when generating an LALR(1) parser")]
+	ReduceReduce,
+	#[error("encountered a shift-reduce ambiguity when generating an LALR(1) parser")]
+	ShiftReduce,
+	// I'm pretty sure shift-shift ambiguities can't be encountered, but this error is included for completion.
+	#[error("encountered a shift-shift ambiguity when generating an LALR(1) parser")]
+	ShiftShift,
+	// I'm also pretty sure this can never occur, but I'm including it anyway.
+	#[error("encountered a missing state when generating an LALR(1) parser")]
+	MissingState,
+}
+
+#[derive(Error, Debug)]
+pub enum ParseError<X: Error> {
+	#[error(transparent)]
+	LexError(#[from] X),
+	Something,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action<N, T> {
 	Reduce(Production<N, T>),
 	Shift(usize),
 }
 
-// p. 251 shows the LR parsing algorithm (how these tables are utilized!)
 #[derive(Debug)]
 pub struct Table<N: Downset, T: Downset>
 where
-	[(); Option::<T>::SIZE]:,
+	[(); T::SIZE]:,
 	[(); N::SIZE]:,
 {
-	state: BTreeSet<Item<N, T>>, // not necessary?
-	action: Pow<Option<T>, Option<Action<N, T>>>,
-	goto: Pow<N, Option<usize>>, // See p. 261, 265.
+	state: BTreeSet<Item<N, T>>,
+	reduction: Option<Production<N, T>>,
+	action: Pow<T, Option<Action<N, T>>>,
+	goto: Pow<N, Option<usize>>,
 }
 
 #[derive(Debug)]
 pub struct Parser<N: Downset, T: Downset>
 where
-	[(); Option::<T>::SIZE]:,
+	[(); T::SIZE]:,
 	[(); N::SIZE]:,
 {
-	// TODO; Refer to Algorithm 4.56, p. 265
-	// When constructing the parser, also keep a map from state kernels to the respective indices.
-	// Or maybe keeping the list as a BTreeMap from kernels to sets is more apt for this... nah, what am I saying.
-	list: Vec<Table<N, T>>,
-	initial_state_index: usize,
+	table_by_state: Vec<Table<N, T>>,
+	initial_state: usize,
 }
 
 impl<N: Downset, T: Downset> Parser<N, T>
 where
-	[(); Option::<T>::SIZE]:,
+	[(); T::SIZE]:,
 	[(); N::SIZE]:,
 {
-	pub fn new(grammar: &Grammar<N, T>) -> Option<Self>
+	// TODO: This code is really hard to read and should be cleaned up/refactored.
+	pub fn new(grammar: &Grammar<N, T>) -> Result<Self, GenerateParserError>
 	where
 		N: Copy + Eq + Ord + Downset + Sequence + Debug,
 		T: Copy + Eq + Ord + Sequence + Debug,
 	{
+		use Action::*;
+		use GenerateParserError::*;
 		let lalr1_bases = kernels(grammar);
 
 		let lalr1_spans: Vec<_> = lalr1_bases
@@ -271,105 +296,121 @@ where
 			.map(|lalr1_basis| State::new(lalr1_basis).elaborate(grammar).items)
 			.collect();
 
-		// OKAY, this deviates from the algorithm, but I'm pretty sure
-		// that the algorithm as described in the book
-		// is actually wrongly/incompletely specified (as in this is probably
-		// a necessary modification for LALR(1) as opposed to LR(1).
-		//
-		// The reason I believe so is that it appears to me that the
-		// collection of LALR(1) states is not closed under
-		// stepping by a random nonterminal and then LALR(1)-elaborating.
-		// It seems to me that doing so could create states which
-		// are strict subsets of other states which share the same core
-		// or perhaps share the same LR(0) items entirely
-		// but have different, say, lookaheads.
-		//
-		// TODO: Convince myself of this, or otherwise disprove it!
 		let mut index_of_basis = BTreeMap::new();
 		for (index, span) in lalr1_spans.clone().into_iter().enumerate() {
 			// TODO: To prevent bugs, turn instances of span_to_basis into a single function on states! Maybe even LR(1) kernels, if that concept exists...
 			// Yeah, that concept exists: check p. 270. 4.7.5.
 			// So, convert to an LR(1) kernel, then convert to an LR(0) kernel?
-			let basis: BTreeSet<_> = span.iter().map(Item::item).cloned().collect();
+			let basis: BTreeSet<lr0::Item<N, T>> = lr0::State::new(span.iter().map(Item::item).cloned().collect())
+				.summarize()
+				.items;
 			index_of_basis.insert(basis, index);
 		}
 		let index_of_basis = index_of_basis;
 
 		let mut action_tables = Vec::new();
 		let mut goto_tables = Vec::new();
+		let mut reductions = Vec::new();
 		for lalr1_span in lalr1_spans.clone() {
 			// Construct the ACTION table.
-			// TODO: Explicit type annotation is required due to type inference bug in generic_const_exprs.
+			// NOTE: Explicit type hinting is required due to type inference bug in generic_const_exprs.
 			// TODO: Might be a good idea to construct a minimal example and report as an issue?
-			let mut action_table = Pow::<Option<T>, Option<Action<N, T>>>::new(|x| match x {
+			let mut action_table = Pow::<T, Option<Action<N, T>>>::new(|x| match x {
 				_ => None,
 			});
+			let mut reduction = Option::None;
 			for item in &lalr1_span {
 				match item.item.requirement() {
 					Some(Symbol::Terminal(requirement)) => {
-						let next_state = State::new(lalr1_span.clone()).step(grammar, Symbol::Terminal(requirement));
-						let next_state_index = index_of_basis.get(&next_state.items.iter().map(Item::item).cloned().collect());
-
-						if next_state_index.is_none() {
-							println!("Could not find {:#?}", next_state.items);
-							println!("Inside list {:#?}", lalr1_spans);
-							println!("After stepping {:#?}", lalr1_span);
-							println!("By {:#?}", requirement);
-						}
-
-						let next_state_index = next_state_index.unwrap();
-
-						let desired_action = Some(Action::Shift(*next_state_index));
-						if !action_table[Some(requirement)].is_none() && action_table[Some(requirement)] != desired_action {
-							// TODO: Remove panics.
-							panic!("Conflict encountered: could not resolve ambiguity in grammar.");
-							return None;
-						}
-						action_table[Some(requirement)] = desired_action;
-					},
-					Some(_) => (),
-					None => {
-						let desired_action = Some(Action::Reduce(item.item.production().clone()));
-
-						if !action_table[item.sentinel].is_none() && action_table[item.sentinel] != desired_action {
-							// TODO: Remove panics.
-							panic!("Conflict encountered: could not resolve ambiguity in grammar.");
-							return None;
-						}
-						action_table[item.sentinel] = desired_action
-					},
-				}
-			}
-			action_tables.push(action_table);
-
-			// Construct the GOTO table.
-			let goto_table = pow![
-				nonterminal =>
-					index_of_basis
-						.get(
-							&State::new(lalr1_span.clone())
-								.step(
-									grammar,
-									Symbol::Nonterminal(nonterminal)
-								)
+						let next_state_items = lr0::State::new(
+							State::new(lalr1_span.clone())
+								.step(grammar, Symbol::Terminal(requirement))
 								.items
 								.iter()
 								.map(Item::item)
 								.cloned()
-								.collect()
-						).copied()
+								.collect(),
+						)
+						.summarize();
+						let next_state_index = index_of_basis.get(&next_state_items.items()).ok_or(MissingState)?;
+
+						let desired_shift_action = Action::Shift(*next_state_index);
+						match action_table[requirement]
+							.as_ref()
+							.filter(|&action| action != &desired_shift_action)
+						{
+							Some(Reduce(_)) => return Err(ShiftReduce),
+							Some(Shift(_)) => return Err(ShiftShift),
+							None => action_table[requirement] = Some(desired_shift_action),
+						}
+					},
+					Some(_) => (),
+					None => {
+						let desired_reduction = item.item.production().clone();
+						match item.sentinel {
+							Some(sentinel) => {
+								let desired_reduction_action = Action::Reduce(desired_reduction);
+								match action_table[sentinel]
+									.as_ref()
+									.filter(|&action| action != &desired_reduction_action)
+								{
+									Some(Reduce(_)) => return Err(ReduceReduce),
+									Some(Shift(_)) => return Err(ShiftReduce),
+									None => action_table[sentinel] = Some(desired_reduction_action),
+								}
+							},
+							None => match reduction.as_ref().filter(|&reduction| reduction != &desired_reduction) {
+								Some(_) => return Err(ReduceReduce),
+								None => reduction = Some(desired_reduction),
+							},
+						}
+					},
+				}
+			}
+			action_tables.push(action_table);
+			reductions.push(reduction);
+
+			// Construct the GOTO table.
+			let goto_table = pow![
+				nonterminal => {
+					let lalr1_items: BTreeSet<_> = State::new(lalr1_span.clone())
+					.step(
+						grammar,
+						Symbol::Nonterminal(nonterminal)
+					)
+					.items
+					.iter()
+					.map(Item::item)
+					.cloned()
+					.collect();
+
+					let lr0_basis = lr0::State::new(lalr1_items).summarize().items().clone();
+
+					if lr0_basis.len() > 0 {
+						Some(index_of_basis.get(&lr0_basis).copied().unwrap())
+					} else {
+						None
+					}
+				}
 			];
+
 			goto_tables.push(goto_table);
 		}
 
-		Some(Self {
-			list: lalr1_spans
+		Ok(Self {
+			table_by_state: lalr1_spans
 				.into_iter()
+				.zip(reductions.into_iter())
 				.zip(action_tables.into_iter().zip(goto_tables.into_iter()))
-				.map(|(state, (action, goto))| Table { state, action, goto })
+				// NOTE: Explicit type hinting is required due to type inference bug in generic_const_exprs.
+				.map(|((state, reduction), (action, goto))| Table::<N, T> {
+					state,
+					reduction,
+					action,
+					goto,
+				})
 				.collect(),
-			initial_state_index: index_of_basis[&State::new(btreeset![lr1_item![0; ? -> @grammar.start(); ?]])
-				.elaborate(grammar)
+			initial_state: index_of_basis[&State::new(btreeset![lr1_item![0; ? -> @grammar.start(); ?]])
 				.items
 				.iter()
 				.map(Item::item)
@@ -377,36 +418,136 @@ where
 				.collect()],
 		})
 	}
+
+	// TODO: This code is really hard to read and should be cleaned up/refactored.
+	// FIXME: We're using the word 'state' for two different kinds of things - the 'states'
+	// of LR(0)/LR(1), and the state indices in a state machine like this.
+	pub fn parse<E, L: HasTerminal<T>, X: Error>(
+		&self,
+		mut lexer: impl Iterator<Item = Result<L, X>>,
+		mut produce: impl FnMut(&[Symbol<(N, E), L>]) -> E,
+	) -> Result<E, ParseError<X>>
+	where
+		N: Clone + Debug,
+		T: Debug,
+		L: Debug,
+		E: Debug,
+	{
+		let mut states = vec![self.initial_state];
+		let mut expressions: Vec<Symbol<(N, E), L>> = vec![];
+
+		while let Some(token) = lexer.next() {
+			if let Ok(token) = token {
+				'token: loop {
+					let state = states.last().expect("Ran out of states unexpectedly.");
+					let table = self.table_by_state.get(*state).expect(
+						"A state in the state stack was invalid. This should never occur if table generation was correct!",
+					);
+					let action = table.action[token.terminal()]
+						.as_ref()
+						.unwrap_or_else(|| panic!("Unexpected terminal encountered: {:#?}\nExisting actions: {:#?}\nExpression stack: {:#?},\nstate: {:#?}", token, table.action, expressions, table.state));
+					match action {
+						Action::Shift(next_state) => {
+							states.push(*next_state);
+							expressions.push(Symbol::Terminal(token));
+
+							break 'token;
+						},
+						Action::Reduce(production) => {
+							let next_length = states
+								.len()
+								.checked_sub(production.pattern().len())
+								.expect("Encountered production with pattern of greater length than the current state stack.");
+							states.truncate(next_length);
+
+							let state = states.last().expect("Ran out of states unexpectedly.");
+							let table = self
+								.table_by_state
+								.get(*state)
+								.expect("A state in the state stack was invalid. This should never occur if table generation was correct!");
+							let next_length = expressions.len().checked_sub(production.pattern().len()).expect(
+								"Encountered production with pattern of greater length than the current expression stack.",
+							);
+
+							let next_expression = produce(expressions.drain(next_length..).as_slice());
+							if let Some(nonterminal) = production.target() {
+								let next_state = table.goto[nonterminal.clone()].expect("Invalid goto reached.");
+								states.push(next_state);
+								expressions.push(Symbol::Nonterminal((nonterminal.clone(), next_expression)));
+							} else {
+								// FIXME: This really bothers me, as if the reduction is called when encountering a terminal which is not the end symbol, then the target of the production can never be the start symbol.
+								panic!("We encountered a reduce action with a start target. This shold never happen!")
+							}
+						},
+					}
+				}
+			} else {
+				token?;
+			}
+		}
+
+		while let Some(state) = states.last() {
+			let table = self
+				.table_by_state
+				.get(*state)
+				.expect("A state in the state stack was invalid. This should never occur if table generation was correct!");
+			let production = table
+				.reduction
+				.as_ref()
+				.unwrap_or_else(|| panic!("Unexpected end of input encountered.\nCurrent table: {:#?}", table.state));
+			let next_length = states
+				.len()
+				.checked_sub(production.pattern().len())
+				.expect("Encountered production with pattern of greater length than the current state stack.");
+			states.truncate(next_length);
+
+			let state = states.last().expect("Ran out of states unexpectedly.");
+			let table = self
+				.table_by_state
+				.get(*state)
+				.expect("A state in the state stack was invalid. This should never occur if table generation was correct!");
+
+			let next_length = expressions
+				.len()
+				.checked_sub(production.pattern().len())
+				.expect("Encountered production with pattern of greater length than the current expression stack.");
+			let drainage = expressions.drain(next_length..).collect::<Vec<_>>();
+
+			let next_expression = produce(drainage.as_slice());
+
+			if let Some(nonterminal) = production.target() {
+				let next_state = table.goto[nonterminal.clone()]
+					.unwrap_or_else(|| panic!("Invalid goto reached. Nonterminal: {:#?}", nonterminal.clone()));
+				states.push(next_state);
+				expressions.push(Symbol::Nonterminal((nonterminal.clone(), next_expression)));
+			} else {
+				return Ok(next_expression);
+			}
+		}
+
+		panic!("Parsing ended without reducing by the start production.");
+	}
 }
 
 mod tests {
 	use enum_iterator::Sequence;
 
-	use crate::*;
+	use crate::{*, lalr1::GenerateParserError};
 
 	// Figure 4.47, p. 275
 	#[test]
 	fn test_lalr1_kernels() {
 		#[derive(Debug, Sequence, Clone, Copy, PartialOrd, Ord, Eq, PartialEq)]
-		enum Terminal {
-			Id,
-			Equals,
-			Star,
-		}
-
+		#[rustfmt::skip]
+		enum Terminal { Id, Equals, Star, }
 		use Terminal::*;
 
 		#[derive(Debug, Sequence, Clone, Copy, PartialOrd, Ord, Eq, PartialEq)]
 		#[repr(u8)]
-		enum Nonterminal {
-			S,
-			L,
-			R,
-		}
-
-		impl_downset_for_repr_enum![Nonterminal ~ u8];
-
+		#[rustfmt::skip]
+		enum Nonterminal { S, L, R, }
 		use Nonterminal::*;
+		impl_downset_for_repr_enum![Nonterminal ~ u8];
 
 		let grammar = grammar![
 			S;
@@ -464,5 +605,41 @@ mod tests {
 				],
 			],
 		);
+	}
+
+	// The following test attempt to generate parsing tables for a grammar which is LR(1) but not LALR(1).
+	#[test]
+	fn test_lalr_reduce_reduce_conflict() {
+		#[derive(Debug, Sequence, Clone, Copy, PartialOrd, Ord, Eq, PartialEq)]
+		#[repr(u8)]
+		#[rustfmt::skip]
+		enum Terminal { U, V, X, Y, Z, }
+		impl_downset_for_repr_enum![Terminal ~ u8];
+		use Terminal::*;
+
+		#[derive(Debug, Sequence, Clone, Copy, PartialOrd, Ord, Eq, PartialEq)]
+		#[repr(u8)]
+		#[rustfmt::skip]
+		enum Nonterminal { S, A, B, }
+		use Nonterminal::*;
+		impl_downset_for_repr_enum![Nonterminal ~ u8];
+
+		let grammar = grammar![
+			S;
+			S => [
+				[!U, @A, !Y],
+				[!V, @B, !Y],
+				[!U, @B, !Z],
+				[!V, @A, !Z],
+			],
+			A => [
+				[!X],
+			],
+			B => [
+				[!X]
+			],
+		];
+
+		assert!(matches!(lalr1::Parser::new(&grammar), Err(GenerateParserError::ReduceReduce)));
 	}
 }

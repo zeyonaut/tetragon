@@ -2,7 +2,7 @@ use std::{cmp::min, collections::BTreeSet};
 
 use enum_iterator::{all, Sequence};
 
-use crate::{pow::*, slice::Slice, util::fix};
+use crate::{pow::*, slice::Slice, fix::fix};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Sequence)]
 pub enum Symbol<N, T> {
@@ -77,8 +77,7 @@ where
 	pub fn productions_of<'g>(&'g self, target: N) -> impl Iterator<Item = Production<N, T>> + 'g {
 		self.patterns_of[target]
 			.iter()
-			.enumerate()
-			.map(move |(pattern_index, pattern)| Production {
+			.map(move |pattern| Production {
 				target: Some(target),
 				pattern: pattern.clone(),
 			})
@@ -135,7 +134,7 @@ macro_rules! grammar {
 	};
 
 	// Entry: Parse a list of grammar rules.
-	[$start:expr; $($key:pat => [$([$($kind:tt $symbol:expr),* $(,)?]),* $(,)?]),* $(,)?] => (
+	[$start:expr; $($key:pat => [$([$($kind:tt $symbol:expr),* $(,)?]),* $(,)?] $(,)?)*] => (
 		$crate::grammar::Grammar::new($start, pow! {
 			$($key => slice![$(slice![$(grammar![@symbol $kind $symbol]),*]),*]),*
 		})
@@ -144,6 +143,7 @@ macro_rules! grammar {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Production<N, T> {
+	// TODO: I'm not entirely convinced that this needs to accomodate the start symbol.
 	target: Option<N>,
 	pattern: Slice<Symbol<N, T>>,
 }

@@ -1,0 +1,10 @@
+fib :: {fib @} {m int} [
+	[m =? 0] ?
+	yes | 0
+	no  | [
+		[m =? 1] ?
+		yes | 1
+		no  | [add [fib [add m -1]] [fib [add m -2]]]
+	]
+]
+fib 3
