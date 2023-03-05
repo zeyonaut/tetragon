@@ -31,7 +31,7 @@ where
 	pub fn new(start: N, patterns_of: Pow<N, Slice<Slice<Symbol<N, T>>>>) -> Self {
 		// Compute the initials_of map (FIRST sets).
 		let initials_of = fix(
-			&pow! {
+			pow! {
 				_ => BTreeSet::from([]),
 			},
 			|initials_of| {

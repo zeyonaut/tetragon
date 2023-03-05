@@ -1,4 +1,4 @@
-fib :: {fib @} {m int} [
+fib :: {fib @} {m Int} -> Int [
 	[m =? 0] ?
 	yes | 0
 	no  | [

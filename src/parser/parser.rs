@@ -25,19 +25,23 @@ enum Nonterminal {
 
 impl_downset_for_repr_enum![Nonterminal ~ u8];
 
-#[derive(Debug)]
-pub enum Type {
+#[derive(Clone, Debug)]
+pub enum ParsedType {
 	Name(String),
 	Power { domain: Box<Self>, codomain: Box<Self> },
+	Polarity,
+	Integer,
 }
 
-#[derive(Debug)]
-pub enum Value {
+#[derive(Clone, Debug)]
+pub enum ParsedTerm {
+	Polarity(bool),
 	Integer(i64),
 	Name(String),
 	Function {
 		binding: String,
-		ty: Type,
+		domain: ParsedType,
+		codomain: ParsedType,
 		body: Box<Self>,
 	},
 	Fixpoint {
@@ -59,20 +63,20 @@ pub enum Value {
 	},
 	CaseSplit {
 		scrutinee: Box<Self>,
-		cases: Cases,
+		cases: ParsedCases,
 	},
 }
 
-#[derive(Debug)]
-pub struct Cases {
-	cases: Vec<(String, Box<Value>)>,
+#[derive(Clone, Debug)]
+pub struct ParsedCases {
+	pub cases: Vec<(bool, Box<ParsedTerm>)>,
 }
 
 #[derive(Debug)]
 pub enum Node {
-	Value(Value),
-	Type(Type),
-	Cases(Cases),
+	Term(ParsedTerm),
+	Type(ParsedType),
+	Cases(ParsedCases),
 	Fail,
 }
 
@@ -85,24 +89,24 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 	match target {
 		Nonterminal::Value => {
 			match_slice! { pattern;
-				[Nx(Node::Value(value))] => {
-					Node::Value(value)
+				[Nx(Node::Term(term))] => {
+					Node::Term(term)
 				},
-				[Tx(Name(binding)), Tx(Bicolon), Nx(Node::Value(definition)), Nx(Node::Value(rest))] => {
-					Node::Value(Value::Assignment {
+				[Tx(Name(binding)), Tx(Bicolon), Nx(Node::Term(definition)), Nx(Node::Term(rest))] => {
+					Node::Term(ParsedTerm::Assignment {
 						binding,
 						definition: Box::new(definition),
 						rest: Box::new(rest),
 					})
 				},
-				[Nx(Node::Value(left)), Tx(EqualsQuestion), Nx(Node::Value(right))] => {
-					Node::Value(Value::EqualityQuery {
+				[Nx(Node::Term(left)), Tx(EqualsQuestion), Nx(Node::Term(right))] => {
+					Node::Term(ParsedTerm::EqualityQuery {
 						left: Box::new(left),
 						right: Box::new(right),
 					})
 				},
-				[Nx(Node::Value(scrutinee)), Tx(Question), Nx(Node::Cases(cases))] => {
-					Node::Value(Value::CaseSplit {
+				[Nx(Node::Term(scrutinee)), Tx(Question), Nx(Node::Cases(cases))] => {
+					Node::Term(ParsedTerm::CaseSplit {
 						scrutinee: Box::new(scrutinee),
 						cases,
 					})
@@ -112,11 +116,11 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 		},
 		Nonterminal::AppliedValue => {
 			match_slice! { pattern;
-				[Nx(Node::Value(value))] => {
-					Node::Value(value)
+				[Nx(Node::Term(term))] => {
+					Node::Term(term)
 				},
-				[Nx(Node::Value(function)), Nx(Node::Value(argument))] => {
-					Node::Value(Value::Application {
+				[Nx(Node::Term(function)), Nx(Node::Term(argument))] => {
+					Node::Term(ParsedTerm::Application {
 						function: Box::new(function),
 						argument: Box::new(argument)
 					})
@@ -127,19 +131,23 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 		Nonterminal::DelimitedValue => {
 			match_slice! { pattern;
 				[Tx(IntegerLiteral(integer))] => {
-					Node::Value(Value::Integer(integer))
+					Node::Term(ParsedTerm::Integer(integer))
 				},
 				[Tx(Name(name))] => {
-					Node::Value(Value::Name(name))
+					match name.as_ref() {
+						"yes" => Node::Term(ParsedTerm::Polarity(true)),
+						"no" => Node::Term(ParsedTerm::Polarity(false)),
+						_ => Node::Term(ParsedTerm::Name(name)),
+					}
 				},
-				[Tx(OpenOrtho), Nx(Node::Value(value)), Tx(CloseOrtho)] => {
-					Node::Value(value)
+				[Tx(OpenOrtho), Nx(Node::Term(term)), Tx(CloseOrtho)] => {
+					Node::Term(term)
 				},
-				[Tx(OpenCurly), Tx(Name(binding)), Nx(Node::Type(ty)), Tx(CloseCurly), Nx(Node::Value(body))] => {
-					Node::Value(Value::Function { binding, ty, body: Box::new(body) })
+				[Tx(OpenCurly), Tx(Name(binding)), Nx(Node::Type(domain)), Tx(CloseCurly), Tx(Arrow), Nx(Node::Type(codomain)), Nx(Node::Term(body))] => {
+					Node::Term(ParsedTerm::Function { binding, domain, codomain, body: Box::new(body) })
 				},
-				[Tx(OpenCurly), Tx(Name(binding)), Tx(Arrova), Tx(CloseCurly), Nx(Node::Value(body))] => {
-					Node::Value(Value::Fixpoint { binding, body: Box::new(body) })
+				[Tx(OpenCurly), Tx(Name(binding)), Tx(Arrova), Tx(CloseCurly), Nx(Node::Term(body))] => {
+					Node::Term(ParsedTerm::Fixpoint { binding, body: Box::new(body) })
 				},
 				_ => Node::Fail,
 			}
@@ -147,10 +155,10 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 		Nonterminal::Cases => {
 			match_slice! { pattern;
 				[] => {
-					Node::Cases(Cases { cases: Vec::new() })
+					Node::Cases(ParsedCases { cases: Vec::new() })
 				},
-				[Nx(Node::Cases(Cases {cases})), Tx(Name(name)), Tx(Bar), Nx(Node::Value(value))] => {
-					Node::Cases({ let mut cases = cases; cases.push((name, Box::new(value))); Cases { cases }})
+				[Nx(Node::Cases(ParsedCases {cases})), Nx(Node::Term(ParsedTerm::Polarity(polarity))), Tx(Bar), Nx(Node::Term(term))] => {
+					Node::Cases({ let mut cases = cases; cases.push((polarity, Box::new(term))); ParsedCases { cases }})
 				},
 				_ => Node::Fail,
 			}
@@ -161,7 +169,7 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 					Node::Type(ty)
 				},
 				[Nx(Node::Type(domain)), Tx(Arrow), Nx(Node::Type(codomain))] => {
-					Node::Type(Type::Power {
+					Node::Type(ParsedType::Power {
 						domain: Box::new(domain),
 						codomain: Box::new(codomain),
 					})
@@ -172,7 +180,11 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 		Nonterminal::DelimitedType => {
 			match_slice! { pattern;
 				[Tx(Name(name))] => {
-					Node::Type(Type::Name(name))
+					match name.as_ref() {
+						"Int" => Node::Type(ParsedType::Integer),
+						"Pol" => Node::Type(ParsedType::Polarity),
+						_ => Node::Type(ParsedType::Name(name)),
+					}
 				},
 				_ => Node::Fail,
 			}
@@ -205,12 +217,12 @@ impl Parser {
 				[!IntegerLiteral],
 				[!Name],
 				[!OpenOrtho, @Value, !CloseOrtho],
-				[!OpenCurly, !Name, @Type, !CloseCurly, @DelimitedValue],   // Lambda binding
+				[!OpenCurly, !Name, @Type, !CloseCurly, !Arrow, @DelimitedType, @DelimitedValue],   // Lambda binding
 				[!OpenCurly, !Name, !Arrova, !CloseCurly, @DelimitedValue], // Mu binding
 			]
 			Cases => [
-				[],                                     // Empty cases
-				[@Cases, !Name, !Bar, @DelimitedValue], // Inhabited cases
+				[],                                               // Empty cases
+				[@Cases, @DelimitedValue, !Bar, @DelimitedValue], // Inhabited cases
 			]
 			Type => [
 				[@DelimitedType],

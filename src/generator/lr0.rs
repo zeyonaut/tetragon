@@ -140,7 +140,7 @@ where
 		T: Copy + Eq + Ord,
 	{
 		Self {
-			items: fix(&self.items, |items| {
+			items: fix(self.items.clone(), |items| {
 				let mut new_items = items.clone();
 				for item in items {
 					if let Some(Symbol::Nonterminal(successor)) = item.requirement() {
@@ -185,13 +185,13 @@ where
 		.elaborate(grammar)
 	}
 
-	pub fn canonical_spans(grammar: &Grammar<N, T>) -> BTreeSet<Self>
+	pub fn canonical_cokernels(grammar: &Grammar<N, T>) -> BTreeSet<Self>
 	where
 		N: Sequence + Copy + PartialEq + Eq + Ord + Debug,
 		T: Sequence + Copy + PartialEq + Eq + Ord + Debug,
 	{
 		fix(
-			&btreeset![State::new(btreeset![Item::new(grammar.start_production())]).elaborate(grammar)],
+			btreeset![State::new(btreeset![Item::new(grammar.start_production())]).elaborate(grammar)],
 			|collection| {
 				let mut new_collection = collection.clone();
 				for set in collection {
@@ -205,6 +205,17 @@ where
 				new_collection
 			},
 		)
+	}
+
+	pub fn canonical_kernels(grammar: &Grammar<N, T>) -> BTreeSet<Self>
+	where
+		N: Sequence + Copy + PartialEq + Eq + Ord + Debug,
+		T: Sequence + Copy + PartialEq + Eq + Ord + Debug,
+	{
+		Self::canonical_cokernels(grammar)
+			.into_iter()
+			.map(|span| span.summarize())
+			.collect()
 	}
 }
 
@@ -314,7 +325,7 @@ mod tests {
 			],
 		];
 
-		let spans: BTreeSet<_> = State::canonical_spans(&grammar);
+		let spans: BTreeSet<_> = State::canonical_cokernels(&grammar);
 
 		let bases: BTreeSet<_> = spans.iter().map(|span| span.summarize()).collect();
 

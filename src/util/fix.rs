@@ -1,8 +1,7 @@
-pub fn fix<T>(point: &T, mut map: impl FnMut(&T) -> T) -> T
+pub fn fix<T>(mut point: T, mut map: impl FnMut(&T) -> T) -> T
 where
-	T: Eq + Clone,
+	T: Eq,
 {
-	let mut point = point.clone();
 	loop {
 		let new_point = map(&point);
 		if new_point == point {

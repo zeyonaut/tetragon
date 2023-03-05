@@ -9,6 +9,7 @@
 // FIXME: Track relevant issues: this may be replaced.
 // REASON: This is used as a way for a declarative macro to easily obtain the number of variants of an enum without having to parse the enum itself.
 #![feature(variant_count)]
+#![feature(never_type)]
 // TODO: Remove this.
 // REASON: Reduces warning noise while prototyping.
 #![allow(dead_code, unused_macros)]
@@ -25,7 +26,11 @@ mod util;
 
 use generator::*;
 use grammar::*;
-use parser::{lexer::Lexer, parser::Parser};
+use parser::{
+	elaborator::{elaborate, Context, Type},
+	lexer::Lexer,
+	parser::{Node, Parser},
+};
 use util::*;
 
 fn main() {
@@ -33,7 +38,27 @@ fn main() {
 
 	let parser = Parser::new().unwrap();
 
-	let x = parser.parse(lexer).unwrap();
+	let expression = parser.parse(lexer).unwrap();
 
-	println!("{:#?}", x);
+	if let Node::Term(parsed_term) = expression {
+		let elaborated_expression = elaborate(
+			Context::new(vec![(
+				"add".to_owned(),
+				Type::Power {
+					domain: Box::new(Type::Integer),
+					codomain: Box::new(Type::Power {
+						domain: Box::new(Type::Integer),
+						codomain: Box::new(Type::Integer),
+					}),
+				},
+			)]),
+			parsed_term,
+			None,
+		)
+		.unwrap();
+
+		println!("{:#?}", elaborated_expression);
+	} else {
+		panic!("Not a term");
+	}
 }

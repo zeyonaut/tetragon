@@ -80,6 +80,7 @@ macro_rules! lr1_item {
 	});
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct State<N: Downset, T> {
 	items: BTreeSet<Item<N, T>>,
 }
@@ -106,7 +107,7 @@ where
 		T: Copy + Eq + Ord,
 	{
 		Self {
-			items: fix(&self.items, |items| {
+			items: fix(self.items.clone(), |items| {
 				let mut new_items = items.clone();
 				for item in items {
 					if let Some(Symbol::Nonterminal(successor)) = item.item().requirement() {
@@ -137,95 +138,99 @@ where
 		)
 		.elaborate(grammar)
 	}
-}
 
-pub fn kernels<N, T>(grammar: &Grammar<N, T>) -> BTreeSet<BTreeSet<Item<N, T>>>
-where
-	N: Copy + Eq + Ord + Downset + Sequence + Debug,
-	T: Copy + Eq + Ord + Sequence + Debug,
-	[(); N::SIZE]:,
-{
-	// Step 0: Compute LR0 Kernels
-	let lr0_kernels: BTreeSet<BTreeSet<lr0::Item<N, T>>> = lr0::State::canonical_spans(grammar)
-		.into_iter()
-		.map(|span| span.summarize().items)
-		.collect();
+	pub fn canonical_kernels(grammar: &Grammar<N, T>) -> BTreeSet<Self>
+	where
+		N: Copy + Eq + Ord + Downset + Sequence + Debug,
+		T: Copy + Eq + Ord + Sequence + Debug,
+		[(); N::SIZE]:,
+	{
+		// Step 0: Compute LR0 Kernels
+		let lr0_kernels = lr0::State::canonical_kernels(grammar);
 
-	// Step 2: Determine lookaheads (4.62)
+		// Step 2: Determine lookaheads (4.62)
 
-	// Spontaneous lookaheads:
-	let mut generated_sentinels: BTreeMap<(BTreeSet<lr0::Item<N, T>>, lr0::Item<N, T>), BTreeSet<Option<T>>> = btreemap![
-		(btreeset![lr0::Item::new(grammar.start_production())], lr0::Item::new(grammar.start_production())) => btreeset![None]
-	];
+		// Spontaneous lookaheads:
+		let mut generated_sentinels: BTreeMap<(BTreeSet<lr0::Item<N, T>>, lr0::Item<N, T>), BTreeSet<Option<T>>> = btreemap![
+			(btreeset![lr0::Item::new(grammar.start_production())], lr0::Item::new(grammar.start_production())) => btreeset![None]
+		];
 
-	// Propagated lookaheads:
-	let mut sentinel_recipients: BTreeMap<
-		(BTreeSet<lr0::Item<N, T>>, lr0::Item<N, T>),
-		BTreeSet<(BTreeSet<lr0::Item<N, T>>, lr0::Item<N, T>)>,
-	> = btreemap![];
+		// Propagated lookaheads:
+		let mut sentinel_recipients: BTreeMap<
+			(BTreeSet<lr0::Item<N, T>>, lr0::Item<N, T>),
+			BTreeSet<(BTreeSet<lr0::Item<N, T>>, lr0::Item<N, T>)>,
+		> = btreemap![];
 
-	for lr0_kernel in &lr0_kernels {
-		for lr0_item in lr0_kernel {
-			// We elaborate to see which items in the span will generate/propagate lookaheads to other states.
-			let lalr1_testing_span = State::new(btreeset![Item::new(lr0_item.clone(), None)]).elaborate(grammar);
-			for lalr1_testing_item in lalr1_testing_span.items() {
-				if let Some(requirement) = lalr1_testing_item.item().requirement() {
-					// This computes GOTO(I, X).
-					let successor_lr0_kernel = lr0::State::new(lr0_kernel.clone())
-						.elaborate(grammar)
-						.step(grammar, requirement)
-						.summarize();
-
-					let successor_lr0_item = lalr1_testing_item.item().successor();
-
-					if let Some(generated_sentinel) = lalr1_testing_item.sentinel() {
-						generated_sentinels
-							.entry((successor_lr0_kernel.items, successor_lr0_item))
-							.or_default()
-							.insert(Some(generated_sentinel));
-					} else {
-						sentinel_recipients
-							.entry((lr0_kernel.clone(), lr0_item.clone()))
-							.or_default()
-							.insert((successor_lr0_kernel.items, successor_lr0_item));
-					}
-				}
-			}
-		}
-	}
-
-	// Propagate lookaheads.
-	let sentinels_of = fix(&generated_sentinels, |sentinels| {
-		let mut new_sentinels = sentinels.clone();
 		for lr0_kernel in &lr0_kernels {
-			for lr0_item in lr0_kernel {
-				let donor = (lr0_kernel.clone(), lr0_item.clone());
-				if let Some(donor_sentinels) = sentinels.get(&donor) {
-					for recipient in sentinel_recipients.entry(donor.clone()).or_default().iter() {
-						new_sentinels
-							.entry(recipient.clone())
-							.or_default()
-							.extend(donor_sentinels.iter());
+			for lr0_item in lr0_kernel.items() {
+				// We elaborate to see which items in the span will generate/propagate lookaheads to other states.
+				let lalr1_testing_span = State::new(btreeset![Item::new(lr0_item.clone(), None)]).elaborate(grammar);
+				for lalr1_testing_item in lalr1_testing_span.items() {
+					if let Some(requirement) = lalr1_testing_item.item().requirement() {
+						// This computes GOTO(I, X).
+						let successor_lr0_kernel = lr0_kernel.clone().elaborate(grammar).step(grammar, requirement).summarize();
+
+						let successor_lr0_item = lalr1_testing_item.item().successor();
+
+						if let Some(generated_sentinel) = lalr1_testing_item.sentinel() {
+							generated_sentinels
+								.entry((successor_lr0_kernel.items, successor_lr0_item))
+								.or_default()
+								.insert(Some(generated_sentinel));
+						} else {
+							sentinel_recipients
+								.entry((lr0_kernel.items().clone(), lr0_item.clone()))
+								.or_default()
+								.insert((successor_lr0_kernel.items, successor_lr0_item));
+						}
 					}
 				}
 			}
 		}
-		new_sentinels
-	});
 
-	// Extract kernels.
-	let mut lalr1_kernels_of: BTreeMap<BTreeSet<lr0::Item<N, T>>, BTreeSet<Item<N, T>>> = btreemap![];
+		// Propagate lookaheads.
+		let sentinels_of = fix(generated_sentinels, |sentinels| {
+			let mut new_sentinels = sentinels.clone();
+			for lr0_kernel in &lr0_kernels {
+				for lr0_item in lr0_kernel.items() {
+					let donor = (lr0_kernel.items().clone(), lr0_item.clone());
+					if let Some(donor_sentinels) = sentinels.get(&donor) {
+						for recipient in sentinel_recipients.entry(donor.clone()).or_default().iter() {
+							new_sentinels
+								.entry(recipient.clone())
+								.or_default()
+								.extend(donor_sentinels.iter());
+						}
+					}
+				}
+			}
+			new_sentinels
+		});
 
-	for ((lr0_kernel, lr0_item), sentinels) in sentinels_of {
-		lalr1_kernels_of
-			.entry(lr0_kernel)
-			.or_default()
-			.extend(sentinels.into_iter().map(|sentinel| Item::new(lr0_item.clone(), sentinel)));
+		// Extract kernels.
+		let mut lalr1_kernels_of: BTreeMap<BTreeSet<lr0::Item<N, T>>, BTreeSet<Item<N, T>>> = btreemap![];
+
+		for ((lr0_kernel, lr0_item), sentinels) in sentinels_of {
+			lalr1_kernels_of
+				.entry(lr0_kernel)
+				.or_default()
+				.extend(sentinels.into_iter().map(|sentinel| Item::new(lr0_item.clone(), sentinel)));
+		}
+
+		lalr1_kernels_of.into_values().map(Self::new).collect()
 	}
 
-	let lalr1_kernels: BTreeSet<BTreeSet<Item<N, T>>> = lalr1_kernels_of.into_values().collect();
-
-	lalr1_kernels
+	pub fn canonical_cokernels(grammar: &Grammar<N, T>) -> BTreeSet<Self>
+	where
+		N: Copy + Eq + Ord + Downset + Sequence + Debug,
+		T: Copy + Eq + Ord + Sequence + Debug,
+		[(); N::SIZE]:,
+	{
+		State::canonical_kernels(grammar)
+			.into_iter()
+			.map(|kernel| State::new(kernel.items).elaborate(grammar))
+			.collect()
+	}
 }
 
 #[derive(Error, Debug, PartialEq)]
@@ -305,15 +310,11 @@ where
 	{
 		use Action::*;
 		use GenerateParserError::*;
-		let lalr1_bases = kernels(grammar);
-
-		let lalr1_spans: Vec<_> = lalr1_bases
-			.into_iter()
-			.map(|lalr1_basis| State::new(lalr1_basis).elaborate(grammar).items)
-			.collect();
+		let lalr1_cokernels = State::canonical_cokernels(grammar);
+		let lalr1_cokernels: Vec<_> = lalr1_cokernels.into_iter().map(|state| state.items).collect();
 
 		let mut index_of_basis = BTreeMap::new();
-		for (index, span) in lalr1_spans.clone().into_iter().enumerate() {
+		for (index, span) in lalr1_cokernels.clone().into_iter().enumerate() {
 			// TODO: To prevent bugs, turn instances of span_to_basis into a single function on states! Maybe even LR(1) kernels, if that concept exists...
 			// Yeah, that concept exists: check p. 270. 4.7.5.
 			// So, convert to an LR(1) kernel, then convert to an LR(0) kernel?
@@ -327,7 +328,7 @@ where
 		let mut action_tables = Vec::new();
 		let mut goto_tables = Vec::new();
 		let mut reductions = Vec::new();
-		for lalr1_span in lalr1_spans.clone() {
+		for lalr1_cokernel in lalr1_cokernels.clone() {
 			// Construct the ACTION table.
 			// NOTE: Explicit type hinting is required due to type inference bug in generic_const_exprs.
 			// TODO: Might be a good idea to construct a minimal example and report as an issue?
@@ -335,11 +336,11 @@ where
 				_ => None,
 			});
 			let mut reduction = Option::None;
-			for item in &lalr1_span {
+			for item in &lalr1_cokernel {
 				match item.item.requirement() {
 					Some(Symbol::Terminal(requirement)) => {
 						let next_state_items = lr0::State::new(
-							State::new(lalr1_span.clone())
+							State::new(lalr1_cokernel.clone())
 								.step(grammar, Symbol::Terminal(requirement))
 								.items
 								.iter()
@@ -389,7 +390,7 @@ where
 			// Construct the GOTO table.
 			let goto_table = pow![
 				nonterminal => {
-					let lalr1_items: BTreeSet<_> = State::new(lalr1_span.clone())
+					let lalr1_items: BTreeSet<_> = State::new(lalr1_cokernel.clone())
 						.step(
 							grammar,
 							Symbol::Nonterminal(nonterminal)
@@ -414,7 +415,7 @@ where
 		}
 
 		Ok(Self {
-			table_by_state: lalr1_spans
+			table_by_state: lalr1_cokernels
 				.into_iter()
 				.zip(reductions.into_iter())
 				.zip(action_tables.into_iter().zip(goto_tables.into_iter()))
@@ -580,43 +581,43 @@ mod tests {
 
 		#[rustfmt::skip]
 		assert_eq!(
-			lalr1::kernels(&grammar),
+			lalr1::State::canonical_kernels(&grammar),
 			btreeset![
-				btreeset![
+				lalr1::State::new(btreeset![
 					lr1_item![0; ? -> @S; ?],
-				],
-				btreeset![
+				]),
+				lalr1::State::new(btreeset![
 					lr1_item![1; ? -> @S; ?],
-				],
-				btreeset![
+				]),
+				lalr1::State::new(btreeset![
 					lr1_item![1; S -> @L, !Equals, @R; ?],
 					lr1_item![1; R -> @L             ; ?],
-				],
-				btreeset![
+				]),
+				lalr1::State::new(btreeset![
 					lr1_item![1; S -> @R; ?],
-				],
-				btreeset![
+				]),
+				lalr1::State::new(btreeset![
 					lr1_item![1; L -> !Star, @R; Equals],
 					lr1_item![1; L -> !Star, @R; ?     ],
-				],
-				btreeset![
+				]),
+				lalr1::State::new(btreeset![
 					lr1_item![1; L -> !Id; Equals],
 					lr1_item![1; L -> !Id; ?     ],
-				],
-				btreeset![
+				]),
+				lalr1::State::new(btreeset![
 					lr1_item![2; S -> @L, !Equals, @R; ?],
-				],
-				btreeset![
+				]),
+				lalr1::State::new(btreeset![
 					lr1_item![2; L -> !Star, @R; Equals],
 					lr1_item![2; L -> !Star, @R; ?     ],
-				],
-				btreeset![
+				]),
+				lalr1::State::new(btreeset![
 					lr1_item![1; R -> @L; Equals],
 					lr1_item![1; R -> @L; ?     ],
-				],
-				btreeset![
+				]),
+				lalr1::State::new(btreeset![
 					lr1_item![3; S -> @L, !Equals, @R; ?]
-				],
+				]),
 			],
 		);
 	}
