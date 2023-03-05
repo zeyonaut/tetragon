@@ -21,16 +21,18 @@ extern crate maplit;
 mod generator;
 #[path = "parser/_.rs"]
 mod parser;
+#[path = "translator/_.rs"]
+mod translator;
 #[path = "util/_.rs"]
 mod util;
 
 use generator::*;
 use grammar::*;
 use parser::{
-	elaborator::{elaborate, Context, Type},
 	lexer::Lexer,
 	parser::{Node, Parser},
 };
+use translator::elaborator::{elaborate, Context, Type};
 use util::*;
 
 fn main() {
