@@ -19,6 +19,8 @@ extern crate maplit;
 
 #[path = "generator/_.rs"]
 mod generator;
+#[path = "interpreter/_.rs"]
+mod interpreter;
 #[path = "parser/_.rs"]
 mod parser;
 #[path = "translator/_.rs"]
@@ -26,17 +28,22 @@ mod translator;
 #[path = "util/_.rs"]
 mod util;
 
+use std::sync::Arc;
+
 use generator::*;
 use grammar::*;
+use interpreter::base::interpret_base;
 use parser::{
 	lexer::Lexer,
 	parser::{Node, Parser},
 };
-use translator::elaborator::{elaborate, Context, Type};
+use translator::elaborator::{elaborate, BaseType, Context};
 use util::*;
 
+use crate::interpreter::base::{BaseEnvironment, BaseValue};
+
 fn main() {
-	let lexer = Lexer::new(include_str!("../tetra/fib.tetra"));
+	let lexer = Lexer::new(include_str!("../examples/fib.tetra"));
 
 	let parser = Parser::new().unwrap();
 
@@ -46,11 +53,11 @@ fn main() {
 		let elaborated_expression = elaborate(
 			Context::new(vec![(
 				"add".to_owned(),
-				Type::Power {
-					domain: Box::new(Type::Integer),
-					codomain: Box::new(Type::Power {
-						domain: Box::new(Type::Integer),
-						codomain: Box::new(Type::Integer),
+				BaseType::Power {
+					domain: Box::new(BaseType::Integer),
+					codomain: Box::new(BaseType::Power {
+						domain: Box::new(BaseType::Integer),
+						codomain: Box::new(BaseType::Integer),
 					}),
 				},
 			)]),
@@ -59,7 +66,21 @@ fn main() {
 		)
 		.unwrap();
 
-		println!("{:#?}", elaborated_expression);
+		let interpreted_value = interpret_base(
+			elaborated_expression,
+			BaseEnvironment::new(vec![(
+				"add".to_owned(),
+				BaseValue::Function(Arc::new(|value_0| match value_0 {
+					BaseValue::Integer(x) => Some(BaseValue::Function(Arc::new(move |value_1| match value_1 {
+						BaseValue::Integer(y) => Some(BaseValue::Integer(x + y)),
+						_ => None,
+					}))),
+					_ => None,
+				})),
+			)]),
+		);
+
+		println!("{:#?}", interpreted_value);
 	} else {
 		panic!("Not a term");
 	}

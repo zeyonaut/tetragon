@@ -116,7 +116,7 @@ macro_rules! lr0_item {
 	});
 }
 
-// TODO: Maybe use some sort of typestate to distinguish between spans, bases, and arbitrary states?
+// TODO: Maybe use some sort of typestate to distinguish between cokernels, kernels, and arbitrary states?
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct State<N: Downset, T> {
 	pub items: BTreeSet<Item<N, T>>,
@@ -134,7 +134,7 @@ where
 		&self.items
 	}
 
-	pub fn elaborate(&self, grammar: &Grammar<N, T>) -> Self
+	pub fn close(&self, grammar: &Grammar<N, T>) -> Self
 	where
 		N: Copy + Eq + Ord,
 		T: Copy + Eq + Ord,
@@ -154,8 +154,7 @@ where
 		}
 	}
 
-	// summarize and elaborate are weak inverses of each other.
-	pub fn summarize(&self) -> Self
+	pub fn coclose(&self) -> Self
 	where
 		N: Copy + Ord,
 		T: Copy + Ord,
@@ -182,7 +181,7 @@ where
 				.map(|item| item.successor())
 				.collect(),
 		)
-		.elaborate(grammar)
+		.close(grammar)
 	}
 
 	pub fn canonical_cokernels(grammar: &Grammar<N, T>) -> BTreeSet<Self>
@@ -191,7 +190,7 @@ where
 		T: Sequence + Copy + PartialEq + Eq + Ord + Debug,
 	{
 		fix(
-			btreeset![State::new(btreeset![Item::new(grammar.start_production())]).elaborate(grammar)],
+			btreeset![State::new(btreeset![Item::new(grammar.start_production())]).close(grammar)],
 			|collection| {
 				let mut new_collection = collection.clone();
 				for set in collection {
@@ -214,7 +213,7 @@ where
 	{
 		Self::canonical_cokernels(grammar)
 			.into_iter()
-			.map(|span| span.summarize())
+			.map(|cokernel| cokernel.coclose())
 			.collect()
 	}
 }
@@ -228,7 +227,7 @@ mod tests {
 
 	// Example 4.40, p. 244
 	#[test]
-	fn test_state_elaborate() {
+	fn test_lr0_closure() {
 		#[derive(Debug, Sequence, Clone, Copy, PartialOrd, Ord, Eq, PartialEq)]
 		enum Terminal {
 			Plus,
@@ -270,10 +269,10 @@ mod tests {
 
 		let state = State::new(btreeset![Item::new(grammar.start_production())]);
 
-		let span = state.elaborate(&grammar);
+		let cokernel = state.close(&grammar);
 
 		assert_eq!(
-			span,
+			cokernel,
 			State::new(btreeset![
 				lr0_item![0; E -> @E, !Plus, @Q],
 				lr0_item![0; ? -> @E],
@@ -288,7 +287,7 @@ mod tests {
 
 	// Example 4.61, p. 271
 	#[test]
-	fn test_state_summarize() {
+	fn test_lr0_coclosure() {
 		#[derive(Debug, Sequence, Clone, Copy, PartialOrd, Ord, Eq, PartialEq)]
 		enum Terminal {
 			Id,
@@ -325,13 +324,13 @@ mod tests {
 			],
 		];
 
-		let spans: BTreeSet<_> = State::canonical_cokernels(&grammar);
+		let cokernels: BTreeSet<_> = State::canonical_cokernels(&grammar);
 
-		let bases: BTreeSet<_> = spans.iter().map(|span| span.summarize()).collect();
+		let kernels: BTreeSet<_> = cokernels.iter().map(|cokernel| cokernel.coclose()).collect();
 
 		#[rustfmt::skip]
 		assert_eq!(
-			bases,
+			kernels,
 			btreeset![
 				State::new(btreeset![lr0_item![0; ? -> @S]]),
 				State::new(btreeset![lr0_item![1; ? -> @S]]),

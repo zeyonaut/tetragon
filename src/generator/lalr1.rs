@@ -101,7 +101,7 @@ where
 	// The closure is the fixed point of the image
 	// of the function that takes an 'item', that is,
 	// a task, and adds all subtasks of it.
-	pub fn elaborate(&self, grammar: &Grammar<N, T>) -> Self
+	pub fn close(&self, grammar: &Grammar<N, T>) -> Self
 	where
 		N: Copy + Eq + Ord,
 		T: Copy + Eq + Ord,
@@ -136,7 +136,7 @@ where
 				.map(|item| item.successor())
 				.collect(),
 		)
-		.elaborate(grammar)
+		.close(grammar)
 	}
 
 	pub fn canonical_kernels(grammar: &Grammar<N, T>) -> BTreeSet<Self>
@@ -163,12 +163,12 @@ where
 
 		for lr0_kernel in &lr0_kernels {
 			for lr0_item in lr0_kernel.items() {
-				// We elaborate to see which items in the span will generate/propagate lookaheads to other states.
-				let lalr1_testing_span = State::new(btreeset![Item::new(lr0_item.clone(), None)]).elaborate(grammar);
-				for lalr1_testing_item in lalr1_testing_span.items() {
+				// We close to see which items in the cokernel will generate/propagate lookaheads to other states.
+				let lalr1_testing_cokernel = State::new(btreeset![Item::new(lr0_item.clone(), None)]).close(grammar);
+				for lalr1_testing_item in lalr1_testing_cokernel.items() {
 					if let Some(requirement) = lalr1_testing_item.item().requirement() {
 						// This computes GOTO(I, X).
-						let successor_lr0_kernel = lr0_kernel.clone().elaborate(grammar).step(grammar, requirement).summarize();
+						let successor_lr0_kernel = lr0_kernel.clone().close(grammar).step(grammar, requirement).coclose();
 
 						let successor_lr0_item = lalr1_testing_item.item().successor();
 
@@ -228,7 +228,7 @@ where
 	{
 		State::canonical_kernels(grammar)
 			.into_iter()
-			.map(|kernel| State::new(kernel.items).elaborate(grammar))
+			.map(|kernel| State::new(kernel.items).close(grammar))
 			.collect()
 	}
 }
@@ -313,17 +313,15 @@ where
 		let lalr1_cokernels = State::canonical_cokernels(grammar);
 		let lalr1_cokernels: Vec<_> = lalr1_cokernels.into_iter().map(|state| state.items).collect();
 
-		let mut index_of_basis = BTreeMap::new();
-		for (index, span) in lalr1_cokernels.clone().into_iter().enumerate() {
-			// TODO: To prevent bugs, turn instances of span_to_basis into a single function on states! Maybe even LR(1) kernels, if that concept exists...
-			// Yeah, that concept exists: check p. 270. 4.7.5.
-			// So, convert to an LR(1) kernel, then convert to an LR(0) kernel?
-			let basis: BTreeSet<lr0::Item<N, T>> = lr0::State::new(span.iter().map(Item::item).cloned().collect())
-				.summarize()
+		let mut index_of_kernel = BTreeMap::new();
+		for (index, cokernel) in lalr1_cokernels.clone().into_iter().enumerate() {
+			// TODO: Consider converting to an LR(1) kernel (p. 270. 4.7.5.), then converting to an LR(0) kernel?
+			let kernel: BTreeSet<lr0::Item<N, T>> = lr0::State::new(cokernel.iter().map(Item::item).cloned().collect())
+				.coclose()
 				.items;
-			index_of_basis.insert(basis, index);
+			index_of_kernel.insert(kernel, index);
 		}
-		let index_of_basis = index_of_basis;
+		let index_of_kernel = index_of_kernel;
 
 		let mut action_tables = Vec::new();
 		let mut goto_tables = Vec::new();
@@ -348,8 +346,8 @@ where
 								.cloned()
 								.collect(),
 						)
-						.summarize();
-						let next_state_index = index_of_basis.get(&next_state_items.items()).ok_or(MissingState)?;
+						.coclose();
+						let next_state_index = index_of_kernel.get(&next_state_items.items()).ok_or(MissingState)?;
 
 						let desired_shift_action = Action::Shift(*next_state_index);
 						match action_table[requirement]
@@ -401,10 +399,10 @@ where
 						.cloned()
 						.collect();
 
-					let lr0_basis = lr0::State::new(lalr1_items).summarize().items().clone();
+					let lr0_kernel = lr0::State::new(lalr1_items).coclose().items().clone();
 
-					if lr0_basis.len() > 0 {
-						index_of_basis.get(&lr0_basis).copied()
+					if lr0_kernel.len() > 0 {
+						index_of_kernel.get(&lr0_kernel).copied()
 					} else {
 						None
 					}
@@ -427,7 +425,7 @@ where
 					goto,
 				})
 				.collect(),
-			initial_state: index_of_basis[&State::new(btreeset![lr1_item![0; ? -> @grammar.start(); ?]])
+			initial_state: index_of_kernel[&State::new(btreeset![lr1_item![0; ? -> @grammar.start(); ?]])
 				.items
 				.iter()
 				.map(Item::item)
