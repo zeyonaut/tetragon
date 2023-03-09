@@ -7,9 +7,10 @@ pub enum BaseTerm<T> {
 	Integer(i64),
 	Name(String),
 	Function {
-		recursive: Option<String>,
-		binding: String,
-		ty: BaseType,
+		fixpoint_name: Option<String>,
+		parameter: String,
+		domain: BaseType,
+		codomain: BaseType,
 		body: Box<T>,
 	},
 	Application {
@@ -17,7 +18,7 @@ pub enum BaseTerm<T> {
 		argument: Box<T>,
 	},
 	Assignment {
-		binding: String,
+		assignee: String,
 		definition: Box<T>,
 		rest: Box<T>,
 	},
@@ -94,7 +95,7 @@ pub fn elaborate_ty(parsed_ty: ParsedType) -> Option<BaseType> {
 }
 
 // TODO: This needs to get cleaned up as it's really messy (in particular: completely different styles in each branch, no error handling with Result).
-// TODO: Do we need or want to un-elaborate by removing types? Do we need to convert let bindings to function applications here too? For the latter, we should be careful of execution order.
+// TODO: Maybe make elaborated expressions a little less 'elaborate' by keeping types easily computable but not necessarily directly stored.
 pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<BaseType>) -> Option<BaseExpression> {
 	match (expected_ty, parsed_term) {
 		(None, ParsedTerm::Polarity(pole)) => Some(BaseExpression {
@@ -114,7 +115,7 @@ pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<
 		(
 			None,
 			ParsedTerm::Function {
-				binding,
+				parameter,
 				domain,
 				codomain,
 				body,
@@ -122,19 +123,23 @@ pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<
 		) => elaborate_ty(domain)
 			.zip(elaborate_ty(codomain))
 			.and_then(|(domain, codomain)| {
-				elaborate(context.extend(binding.clone(), domain.clone()), *body, Some(codomain.clone())).map(|body| {
-					BaseExpression {
-						term: BaseTerm::Function {
-							recursive: None,
-							binding,
-							ty: domain.clone(),
-							body: Box::new(body),
-						},
-						ty: BaseType::Power {
-							domain: Box::new(domain),
-							codomain: Box::new(codomain),
-						},
-					}
+				elaborate(
+					context.extend(parameter.clone(), domain.clone()),
+					*body,
+					Some(codomain.clone()),
+				)
+				.map(|body| BaseExpression {
+					term: BaseTerm::Function {
+						fixpoint_name: None,
+						parameter,
+						domain: domain.clone(),
+						codomain: codomain.clone(),
+						body: Box::new(body),
+					},
+					ty: BaseType::Power {
+						domain: Box::new(domain),
+						codomain: Box::new(codomain),
+					},
 				})
 			}),
 		(
@@ -145,7 +150,7 @@ pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<
 			},
 		) => {
 			if let ParsedTerm::Function {
-				binding: lambda_binding,
+				parameter,
 				domain,
 				codomain,
 				body: lambda_body,
@@ -154,25 +159,31 @@ pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<
 				elaborate_ty(domain)
 					.zip(elaborate_ty(codomain))
 					.and_then(|(domain, codomain)| {
-						elaborate(context.extend(
-							mu_binding.clone(),
-							BaseType::Power {
-								domain: Box::new(domain.clone()),
-								codomain: Box::new(codomain.clone()),
+						elaborate(
+							context
+								.extend(
+									mu_binding.clone(),
+									BaseType::Power {
+										domain: Box::new(domain.clone()),
+										codomain: Box::new(codomain.clone()),
+									},
+								)
+								.extend(parameter.clone(), domain.clone()),
+							(*lambda_body).clone(),
+							Some(codomain.clone()),
+						)
+						.map(|body| BaseExpression {
+							term: BaseTerm::Function {
+								fixpoint_name: Some(mu_binding),
+								parameter,
+								domain: domain.clone(),
+								codomain: codomain.clone(),
+								body: Box::new(body),
 							},
-						).extend(lambda_binding.clone(), domain.clone()), (*lambda_body).clone(), Some(codomain.clone())).map(|body| {
-							BaseExpression {
-								term: BaseTerm::Function {
-									recursive: Some(mu_binding),
-									binding: lambda_binding,
-									ty: domain.clone(),
-									body: Box::new(body),
-								},
-								ty: BaseType::Power {
-									domain: Box::new(domain),
-									codomain: Box::new(codomain),
-								},
-							}
+							ty: BaseType::Power {
+								domain: Box::new(domain),
+								codomain: Box::new(codomain),
+							},
 						})
 					})
 			} else {
@@ -207,7 +218,7 @@ pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<
 			Some(BaseExpression {
 				ty: rest.ty.clone(),
 				term: BaseTerm::Assignment {
-					binding,
+					assignee: binding,
 					definition: Box::new(definition),
 					rest: Box::new(rest),
 				},

@@ -39,7 +39,7 @@ pub enum ParsedTerm {
 	Integer(i64),
 	Name(String),
 	Function {
-		binding: String,
+		parameter: String,
 		domain: ParsedType,
 		codomain: ParsedType,
 		body: Box<Self>,
@@ -143,8 +143,8 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 				[Tx(OpenOrtho), Nx(Node::Term(term)), Tx(CloseOrtho)] => {
 					Node::Term(term)
 				},
-				[Tx(OpenCurly), Tx(Name(binding)), Nx(Node::Type(domain)), Tx(CloseCurly), Tx(Arrow), Nx(Node::Type(codomain)), Nx(Node::Term(body))] => {
-					Node::Term(ParsedTerm::Function { binding, domain, codomain, body: Box::new(body) })
+				[Tx(OpenCurly), Tx(Name(parameter)), Nx(Node::Type(domain)), Tx(CloseCurly), Tx(Arrow), Nx(Node::Type(codomain)), Nx(Node::Term(body))] => {
+					Node::Term(ParsedTerm::Function { parameter, domain, codomain, body: Box::new(body) })
 				},
 				[Tx(OpenCurly), Tx(Name(binding)), Tx(Arrova), Tx(CloseCurly), Nx(Node::Term(body))] => {
 					Node::Term(ParsedTerm::Fixpoint { binding, body: Box::new(body) })

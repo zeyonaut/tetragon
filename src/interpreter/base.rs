@@ -4,7 +4,7 @@ use crate::translator::elaborator::{BaseExpression, BaseTerm};
 
 #[derive(Clone)]
 pub struct RecursiveFunction {
-	name: String,
+	fixpoint_name: String,
 	function: Arc<dyn (Fn(Self, BaseValue) -> Option<BaseValue>)>,
 }
 
@@ -64,29 +64,27 @@ pub fn interpret_base(base_term: BaseExpression, environment: BaseEnvironment) -
 		Integer(x) => Some(BaseValue::Integer(x)),
 		Name(name) => environment.lookup(&name),
 		Function {
-			recursive,
-			binding,
-			ty: _,
+			fixpoint_name,
+			parameter,
+			domain: _,
+			codomain: _,
 			body,
 		} => {
-			if let Some(name) = recursive {
+			if let Some(fixpoint_name) = fixpoint_name {
 				Some(BaseValue::RecursiveFunction(RecursiveFunction {
-					name: name.clone(),
+					fixpoint_name: fixpoint_name.clone(),
 					function: Arc::new(move |fixpoint, value| {
 						interpret_base(
 							(*body).clone(),
 							environment
-								.extend(
-									&fixpoint.name.clone(),
-									BaseValue::RecursiveFunction(fixpoint),
-								)
-								.extend(&binding, value),
+								.extend(&fixpoint.fixpoint_name.clone(), BaseValue::RecursiveFunction(fixpoint))
+								.extend(&parameter, value),
 						)
 					}),
 				}))
 			} else {
 				Some(BaseValue::Function(Arc::new(move |value| {
-					interpret_base((*body).clone(), environment.extend(&binding, value))
+					interpret_base((*body).clone(), environment.extend(&parameter, value))
 				})))
 			}
 		},
@@ -100,7 +98,7 @@ pub fn interpret_base(base_term: BaseExpression, environment: BaseEnvironment) -
 			}
 		},
 		Assignment {
-			binding,
+			assignee: binding,
 			definition,
 			rest,
 		} => {

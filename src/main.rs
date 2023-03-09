@@ -40,7 +40,10 @@ use parser::{
 use translator::elaborator::{elaborate, BaseType, Context};
 use util::*;
 
-use crate::interpreter::base::{BaseEnvironment, BaseValue};
+use crate::{
+	interpreter::base::{BaseEnvironment, BaseValue},
+	translator::cps::convert_program_to_cps,
+};
 
 fn main() {
 	let lexer = Lexer::new(include_str!("../examples/fib.tetra"));
@@ -67,7 +70,7 @@ fn main() {
 		.unwrap();
 
 		let interpreted_value = interpret_base(
-			elaborated_expression,
+			elaborated_expression.clone(),
 			BaseEnvironment::new(vec![(
 				"add".to_owned(),
 				BaseValue::Function(Arc::new(|value_0| match value_0 {
@@ -81,6 +84,8 @@ fn main() {
 		);
 
 		println!("{:#?}", interpreted_value);
+
+		let cypress_term = convert_program_to_cps(elaborated_expression).expect("CPS conversion failed.");
 	} else {
 		panic!("Not a term");
 	}

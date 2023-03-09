@@ -620,7 +620,7 @@ mod tests {
 		);
 	}
 
-	// The following test attempt to generate parsing tables for a grammar which is LR(1) but not LALR(1).
+	// The following test attempts to generate parsing tables for a grammar which is LR(1) but not LALR(1).
 	#[test]
 	fn test_lalr_reduce_reduce_conflict() {
 		#[derive(Debug, Sequence, Clone, Copy, PartialOrd, Ord, Eq, PartialEq)]
