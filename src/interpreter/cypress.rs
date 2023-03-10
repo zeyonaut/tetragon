@@ -13,6 +13,7 @@ pub enum CypressType {
 	Polarity,
 	Integer,
 	Power { domain: Box<Self>, codomain: Box<Self> },
+	Product(Vec<Self>),
 }
 
 #[derive(Debug)]
@@ -20,11 +21,13 @@ pub enum CypressValue {
 	Unity,
 	Polarity(bool),
 	Integer(i64),
+	Tuple(Vec<CypressVariable>),
 }
 
 #[derive(Debug)]
 pub enum CypressOperation {
 	EqualsQuery([CypressVariable; 2]),
+	Projection(CypressVariable, usize),
 }
 
 #[derive(Debug)]

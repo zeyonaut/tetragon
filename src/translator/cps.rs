@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::elaborator::*;
-use crate::interpreter::cypress::*;
+use crate::{interpreter::cypress::*, util::composite::apply_composed};
 
 pub struct SymbolGenerator(u64);
 
@@ -21,42 +21,87 @@ pub fn convert_type_to_cps(base_ty: BaseType) -> CypressType {
 			domain: Box::new(convert_type_to_cps((*domain).clone())),
 			codomain: Box::new(convert_type_to_cps(*codomain)),
 		},
-		BaseType::Product(_) => unimplemented!(),
+		BaseType::Product(tys) => CypressType::Product(tys.into_iter().map(convert_type_to_cps).collect()),
 	}
 }
 
 pub fn convert_expression_to_cps(
 	base_expression: BaseExpression,
-	// A 'one-hole context' which a variable can be plugged into.
-	translation_context: Arc<dyn Fn(CypressVariable, &mut SymbolGenerator) -> Option<CypressTerm>>,
 	symbol_generator: &mut SymbolGenerator,
-) -> Option<CypressTerm> {
+) -> Option<(CypressVariable, Box<dyn Fn(CypressTerm) -> CypressTerm>)> {
 	let ty = base_expression.ty;
 	match base_expression.term {
 		BaseTerm::Polarity(x) => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
-			Some(CypressTerm::AssignValue {
-				binding: binding.clone(),
-				ty: CypressType::Polarity,
-				value: CypressValue::Polarity(x),
-				rest: Box::new(translation_context(binding, symbol_generator)?),
-			})
+			Some((
+				binding.clone(),
+				Box::new(move |rest| CypressTerm::AssignValue {
+					binding: binding.clone(),
+					ty: CypressType::Polarity,
+					value: CypressValue::Polarity(x),
+					rest: Box::new(rest),
+				}),
+			))
 		},
 		BaseTerm::Integer(x) => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
-			Some(CypressTerm::AssignValue {
-				binding: binding.clone(),
-				ty: CypressType::Integer,
-				value: CypressValue::Integer(x),
-				rest: Box::new(translation_context(binding, symbol_generator)?),
-			})
+			Some((
+				binding.clone(),
+				Box::new(move |rest| CypressTerm::AssignValue {
+					binding: binding.clone(),
+					ty: CypressType::Integer,
+					value: CypressValue::Integer(x),
+					rest: Box::new(rest),
+				}),
+			))
 		},
 		BaseTerm::Name(x) => {
 			// TODO: Does it matter that this is not necessarily fresh?
-			Some(translation_context(CypressVariable::Name(x), symbol_generator)?)
+			Some((CypressVariable::Name(x), Box::new(core::convert::identity)))
 		},
-		BaseTerm::Tuple(_) => unimplemented!(),
-		BaseTerm::Projection { tuple: _, index: _ } => unimplemented!(),
+		BaseTerm::Tuple(x) => {
+			let binding = CypressVariable::Auto(symbol_generator.fresh());
+
+			let (part_variables, part_contexts): (Vec<_>, Vec<_>) = x
+				.into_iter()
+				.map(|expression| convert_expression_to_cps(expression, symbol_generator))
+				.collect::<Option<Vec<_>>>()?
+				.into_iter()
+				.unzip();
+			Some((
+				binding.clone(),
+				Box::new(move |body| {
+					apply_composed(
+						part_contexts.iter().map(AsRef::as_ref).rev(),
+						CypressTerm::AssignValue {
+							binding: binding.clone(),
+							ty: CypressType::Integer,
+							value: CypressValue::Tuple(part_variables.clone()),
+							rest: Box::new(body),
+						},
+					)
+				}),
+			))
+		},
+		BaseTerm::Projection { tuple, index } => {
+			let binding = CypressVariable::Auto(symbol_generator.fresh());
+
+			let (tuple_variable, tuple_context) = convert_expression_to_cps(*tuple, symbol_generator)?;
+
+			let outcome_ty = convert_type_to_cps(ty);
+
+			Some((
+				binding.clone(),
+				Box::new(move |body| {
+					tuple_context(CypressTerm::AssignOperation {
+						binding: binding.clone(),
+						ty: outcome_ty.clone(),
+						operation: CypressOperation::Projection(tuple_variable.clone(), index),
+						rest: Box::new(body),
+					})
+				}),
+			))
+		},
 		BaseTerm::Function {
 			fixpoint_name,
 			parameter,
@@ -68,54 +113,54 @@ pub fn convert_expression_to_cps(
 			let continuation = CypressLabel(symbol_generator.fresh());
 			let parameter = CypressVariable::Name(parameter);
 
-			Some(CypressTerm::DeclareFunction {
-				fixpoint_name,
-				binding: binding.clone(),
-				domain: convert_type_to_cps(domain),
-				codomain: convert_type_to_cps(codomain),
-				continuation,
-				parameter,
-				body: Box::new(convert_expression_to_cps(
-					*body,
-					Arc::new(move |argument, _| Some(CypressTerm::Continue { continuation, argument })),
-					symbol_generator,
-				)?),
-				rest: Box::new(translation_context(binding, symbol_generator)?),
-			})
+			let (body_variable, body_context) = convert_expression_to_cps(*body, symbol_generator)?;
+
+			let domain = convert_type_to_cps(domain.clone());
+			let codomain = convert_type_to_cps(codomain.clone());
+
+			Some((
+				binding.clone(),
+				Box::new(move |rest| CypressTerm::DeclareFunction {
+					fixpoint_name: fixpoint_name.clone(),
+					binding: binding.clone(),
+					domain: domain.clone(),
+					codomain: codomain.clone(),
+					continuation,
+					parameter: parameter.clone(),
+					body: Box::new(body_context(CypressTerm::Continue {
+						continuation,
+						argument: body_variable.clone(),
+					})),
+					rest: Box::new(rest),
+				}),
+			))
 		},
 		BaseTerm::Application { function, argument } => {
 			// TODO: Handle intrinsic functions as operations instead. Maybe? Or how long can I delay the introduction of intrinsics?
 			let continuation = CypressLabel(symbol_generator.fresh());
 			let outcome = CypressVariable::Auto(symbol_generator.fresh());
 
-			match convert_type_to_cps(function.ty.clone()) {
-				CypressType::Power { domain: _, codomain } => Some(convert_expression_to_cps(
-					*function,
-					Arc::new(move |function, symbol_generator| {
-						let (codomain, outcome, translation_context) =
-							((*codomain).clone(), outcome.clone(), translation_context.clone());
-						convert_expression_to_cps(
-							(*argument).clone(),
-							Arc::new(move |argument, symbol_generator| {
-								Some(CypressTerm::DeclareContinuation {
-									label: continuation,
-									domain: codomain.clone(),
-									parameter: outcome.clone(),
-									body: Box::new(translation_context(outcome.clone(), symbol_generator)?),
-									rest: Box::new(CypressTerm::Apply {
-										function: function.clone(),
-										continuation,
-										argument,
-									}),
-								})
-							}),
-							symbol_generator,
-						)
-					}),
-					symbol_generator,
-				)?),
-				_ => None,
-			}
+			let (function_variable, function_context) = convert_expression_to_cps(*function, symbol_generator)?;
+			let (argument_variable, argument_context) = convert_expression_to_cps(*argument, symbol_generator)?;
+
+			let outcome_ty = convert_type_to_cps(ty);
+
+			Some((
+				outcome.clone(),
+				Box::new(move |body| {
+					function_context(argument_context(CypressTerm::DeclareContinuation {
+						label: continuation,
+						domain: outcome_ty.clone(),
+						parameter: outcome.clone(),
+						body: Box::new(body),
+						rest: Box::new(CypressTerm::Apply {
+							function: function_variable.clone(),
+							continuation,
+							argument: argument_variable.clone(),
+						}),
+					}))
+				}),
+			))
 		},
 		BaseTerm::Assignment {
 			assignee,
@@ -123,44 +168,42 @@ pub fn convert_expression_to_cps(
 			rest,
 		} => {
 			let continuation = CypressLabel(symbol_generator.fresh());
-			Some(CypressTerm::DeclareContinuation {
-				label: continuation,
-				domain: convert_type_to_cps(definition.ty.clone()),
-				parameter: CypressVariable::Name(assignee),
-				body: Box::new(convert_expression_to_cps(*rest, translation_context, symbol_generator)?),
-				rest: Box::new(convert_expression_to_cps(
-					*definition,
-					Arc::new(move |variable, _| {
-						Some(CypressTerm::Continue {
-							continuation,
-							argument: variable,
-						})
-					}),
-					symbol_generator,
-				)?),
-			})
+
+			let (definition_variable, definition_context) = convert_expression_to_cps((*definition).clone(), symbol_generator)?;
+			let (rest_variable, rest_context) = convert_expression_to_cps(*rest, symbol_generator)?;
+
+			let domain = convert_type_to_cps(definition.ty.clone());
+
+			Some((
+				rest_variable.clone(),
+				Box::new(move |body| CypressTerm::DeclareContinuation {
+					label: continuation,
+					domain: domain.clone(),
+					parameter: CypressVariable::Name(assignee.clone()),
+					body: Box::new(rest_context(body)),
+					rest: Box::new(definition_context(CypressTerm::Continue {
+						continuation,
+						argument: definition_variable.clone(),
+					})),
+				}),
+			))
 		},
 		BaseTerm::EqualityQuery { left, right } => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
-			convert_expression_to_cps(
-				*left,
-				Arc::new(move |left, symbol_generator| {
-					let (binding, translation_context) = (binding.clone(), translation_context.clone());
-					Some(convert_expression_to_cps(
-						(*right).clone(),
-						Arc::new(move |right, symbol_generator| {
-							Some(CypressTerm::AssignOperation {
-								binding: binding.clone(),
-								ty: CypressType::Polarity,
-								operation: CypressOperation::EqualsQuery([left.clone(), right]),
-								rest: Box::new(translation_context(binding.clone(), symbol_generator)?),
-							})
-						}),
-						symbol_generator,
-					)?)
+			let (left_variable, left_context) = convert_expression_to_cps(*left, symbol_generator)?;
+			let (right_variable, right_context) = convert_expression_to_cps(*right, symbol_generator)?;
+
+			Some((
+				binding.clone(),
+				Box::new(move |body| {
+					left_context(right_context(CypressTerm::AssignOperation {
+						binding: binding.clone(),
+						ty: CypressType::Polarity,
+						operation: CypressOperation::EqualsQuery([left_variable.clone(), right_variable.clone()]),
+						rest: Box::new(body),
+					}))
 				}),
-				symbol_generator,
-			)
+			))
 		},
 		BaseTerm::CaseSplit { scrutinee, cases } => {
 			let outcome_continuation = CypressLabel(symbol_generator.fresh());
@@ -169,7 +212,6 @@ pub fn convert_expression_to_cps(
 			let yes_parameter = CypressVariable::Auto(symbol_generator.fresh());
 			let no_continuation = CypressLabel(symbol_generator.fresh());
 			let no_parameter = CypressVariable::Auto(symbol_generator.fresh());
-			let outcome_ty = convert_type_to_cps(ty);
 
 			let mut yes_term = None;
 			let mut no_term = None;
@@ -183,53 +225,44 @@ pub fn convert_expression_to_cps(
 			let yes_term = yes_term?;
 			let no_term = no_term?;
 
-			Some(CypressTerm::DeclareContinuation {
-				label: outcome_continuation,
-				domain: outcome_ty,
-				parameter: outcome_parameter.clone(),
-				body: Box::new(translation_context(outcome_parameter, symbol_generator)?),
-				rest: Box::new(CypressTerm::DeclareContinuation {
-					label: yes_continuation,
-					domain: CypressType::Unity,
-					parameter: yes_parameter,
-					body: Box::new(convert_expression_to_cps(
-						yes_term,
-						Arc::new(move |variable, _| {
-							Some(CypressTerm::Continue {
-								continuation: outcome_continuation,
-								argument: variable,
-							})
-						}),
-						symbol_generator,
-					)?),
+			let (yes_variable, yes_context) = convert_expression_to_cps(yes_term, symbol_generator)?;
+			let (no_variable, no_context) = convert_expression_to_cps(no_term, symbol_generator)?;
+			let (scrutinee_variable, scrutinee_context) = convert_expression_to_cps(*scrutinee, symbol_generator)?;
+
+			let outcome_ty = convert_type_to_cps(ty);
+
+			Some((
+				outcome_parameter.clone(),
+				Box::new(move |body| CypressTerm::DeclareContinuation {
+					label: outcome_continuation,
+					domain: outcome_ty.clone(),
+					parameter: outcome_parameter.clone(),
+					body: Box::new(body),
 					rest: Box::new(CypressTerm::DeclareContinuation {
-						label: no_continuation,
+						label: yes_continuation,
 						domain: CypressType::Unity,
-						parameter: no_parameter,
-						body: Box::new(convert_expression_to_cps(
-							no_term,
-							Arc::new(move |variable, _| {
-								Some(CypressTerm::Continue {
-									continuation: outcome_continuation,
-									argument: variable,
-								})
-							}),
-							symbol_generator,
-						)?),
-						rest: Box::new(convert_expression_to_cps(
-							*scrutinee,
-							Arc::new(move |variable, _| {
-								Some(CypressTerm::CaseSplit {
-									scrutinee: variable,
-									yes_continuation,
-									no_continuation,
-								})
-							}),
-							symbol_generator,
-						)?),
+						parameter: yes_parameter.clone(),
+						body: Box::new(yes_context(CypressTerm::Continue {
+							continuation: outcome_continuation,
+							argument: yes_variable.clone(),
+						})),
+						rest: Box::new(CypressTerm::DeclareContinuation {
+							label: no_continuation,
+							domain: CypressType::Unity,
+							parameter: no_parameter.clone(),
+							body: Box::new(no_context(CypressTerm::Continue {
+								continuation: outcome_continuation,
+								argument: no_variable.clone(),
+							})),
+							rest: Box::new(scrutinee_context(CypressTerm::CaseSplit {
+								scrutinee: scrutinee_variable.clone(),
+								yes_continuation,
+								no_continuation,
+							})),
+						}),
 					}),
 				}),
-			})
+			))
 		},
 	}
 }
@@ -237,9 +270,9 @@ pub fn convert_expression_to_cps(
 pub fn convert_program_to_cps(base_expression: BaseExpression) -> Option<CypressTerm> {
 	let mut symbol_generator = SymbolGenerator(0);
 
-	convert_expression_to_cps(
-		base_expression,
-		Arc::new(|variable, _| Some(CypressTerm::Halt { argument: variable })),
-		&mut symbol_generator,
-	)
+	let (expression_variable, expression_context) = convert_expression_to_cps(base_expression, &mut symbol_generator)?;
+
+	Some(expression_context(CypressTerm::Halt {
+		argument: expression_variable,
+	}))
 }

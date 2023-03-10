@@ -73,7 +73,7 @@ fn main() {
 			parsed_term,
 			None,
 		)
-		.unwrap();
+		.expect("Elaboration failed.");
 
 		let interpreted_value = interpret_base(
 			elaborated_expression.clone(),
@@ -89,11 +89,11 @@ fn main() {
 			)]),
 		);
 
-		println!("{:#?}", interpreted_value);
+		println!("Interpreted value: {:#?}", interpreted_value);
 
-		let cypress_term = convert_program_to_cps(elaborated_expression).expect("CPS conversion failed.");
+		let cypress_term = convert_program_to_cps(elaborated_expression);
 
-		println!("{:#?}", cypress_term);
+		println!("CPS-converted term: {:#?}", cypress_term);
 	} else {
 		panic!("Not a term");
 	}
