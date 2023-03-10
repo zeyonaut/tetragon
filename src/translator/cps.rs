@@ -21,6 +21,7 @@ pub fn convert_type_to_cps(base_ty: BaseType) -> CypressType {
 			domain: Box::new(convert_type_to_cps((*domain).clone())),
 			codomain: Box::new(convert_type_to_cps(*codomain)),
 		},
+		BaseType::Product(_) => unimplemented!(),
 	}
 }
 
@@ -54,6 +55,8 @@ pub fn convert_expression_to_cps(
 			// TODO: Does it matter that this is not necessarily fresh?
 			Some(translation_context(CypressVariable::Name(x), symbol_generator)?)
 		},
+		BaseTerm::Tuple(_) => unimplemented!(),
+		BaseTerm::Projection { tuple: _, index: _ } => unimplemented!(),
 		BaseTerm::Function {
 			fixpoint_name,
 			parameter,
@@ -97,7 +100,7 @@ pub fn convert_expression_to_cps(
 								Some(CypressTerm::DeclareContinuation {
 									label: continuation,
 									domain: codomain.clone(),
-									argument: outcome.clone(),
+									parameter: outcome.clone(),
 									body: Box::new(translation_context(outcome.clone(), symbol_generator)?),
 									rest: Box::new(CypressTerm::Apply {
 										function: function.clone(),
@@ -123,7 +126,7 @@ pub fn convert_expression_to_cps(
 			Some(CypressTerm::DeclareContinuation {
 				label: continuation,
 				domain: convert_type_to_cps(definition.ty.clone()),
-				argument: CypressVariable::Name(assignee),
+				parameter: CypressVariable::Name(assignee),
 				body: Box::new(convert_expression_to_cps(*rest, translation_context, symbol_generator)?),
 				rest: Box::new(convert_expression_to_cps(
 					*definition,
@@ -183,12 +186,12 @@ pub fn convert_expression_to_cps(
 			Some(CypressTerm::DeclareContinuation {
 				label: outcome_continuation,
 				domain: outcome_ty,
-				argument: outcome_parameter.clone(),
+				parameter: outcome_parameter.clone(),
 				body: Box::new(translation_context(outcome_parameter, symbol_generator)?),
 				rest: Box::new(CypressTerm::DeclareContinuation {
 					label: yes_continuation,
 					domain: CypressType::Unity,
-					argument: yes_parameter,
+					parameter: yes_parameter,
 					body: Box::new(convert_expression_to_cps(
 						yes_term,
 						Arc::new(move |variable, _| {
@@ -202,7 +205,7 @@ pub fn convert_expression_to_cps(
 					rest: Box::new(CypressTerm::DeclareContinuation {
 						label: no_continuation,
 						domain: CypressType::Unity,
-						argument: no_parameter,
+						parameter: no_parameter,
 						body: Box::new(convert_expression_to_cps(
 							no_term,
 							Arc::new(move |variable, _| {

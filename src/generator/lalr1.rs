@@ -505,6 +505,8 @@ where
 			let state = states.last().ok_or(DepletedStateStack)?;
 			let table = self.table_by_state.get(*state).ok_or(InvalidState)?;
 
+			// TODO: This reassignment (and the one in the reduce branch above) is required because of the start production.
+			// Is the start production all that necessary after all? Or can we modify the algorithm to get rid of it?
 			let next_length = expressions
 				.len()
 				.checked_sub(production.pattern().len())

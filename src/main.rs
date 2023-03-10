@@ -46,7 +46,13 @@ use crate::{
 };
 
 fn main() {
-	let lexer = Lexer::new(include_str!("../examples/fib.tetra"));
+	let args = std::env::args().collect::<Vec<_>>();
+
+	let file_path = args.get(1).expect("Expected file path as first argument.");
+
+	let file_contents = std::fs::read_to_string(file_path).expect("Could not read specified file.");
+
+	let lexer = Lexer::new(&file_contents);
 
 	let parser = Parser::new().unwrap();
 
@@ -86,6 +92,8 @@ fn main() {
 		println!("{:#?}", interpreted_value);
 
 		let cypress_term = convert_program_to_cps(elaborated_expression).expect("CPS conversion failed.");
+
+		println!("{:#?}", cypress_term);
 	} else {
 		panic!("Not a term");
 	}

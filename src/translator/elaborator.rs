@@ -6,6 +6,11 @@ pub enum BaseTerm<T> {
 	Polarity(bool),
 	Integer(i64),
 	Name(String),
+	Tuple(Vec<T>),
+	Projection {
+		tuple: Box<T>,
+		index: usize,
+	},
 	Function {
 		fixpoint_name: Option<String>,
 		parameter: String,
@@ -38,6 +43,7 @@ pub enum BaseType {
 	//	One,
 	Polarity,
 	Integer,
+	Product(Vec<Self>),
 	Power { domain: Box<Self>, codomain: Box<Self> },
 }
 
@@ -80,7 +86,7 @@ impl Context {
 // TODO: Should this be a part of elaboration? That would required types in the context. I think something like that is necessary for user-defined types.
 pub fn elaborate_ty(parsed_ty: ParsedType) -> Option<BaseType> {
 	match parsed_ty {
-		ParsedType::Name(_) => todo!(),
+		ParsedType::Name(_) => unimplemented!(),
 		ParsedType::Power { domain, codomain } => {
 			elaborate_ty(*domain)
 				.zip(elaborate_ty(*codomain))
@@ -91,6 +97,9 @@ pub fn elaborate_ty(parsed_ty: ParsedType) -> Option<BaseType> {
 		},
 		ParsedType::Polarity => Some(BaseType::Polarity),
 		ParsedType::Integer => Some(BaseType::Integer),
+		ParsedType::Product(factors) => Some(BaseType::Product(
+			factors.into_iter().map(elaborate_ty).collect::<Option<_>>()?,
+		)),
 	}
 }
 
@@ -112,6 +121,32 @@ pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<
 				ty: ty,
 			})
 		}),
+		(None, ParsedTerm::Tuple(tuple)) => {
+			let (expressions, tys): (Vec<BaseExpression>, Vec<BaseType>) = tuple
+				.into_iter()
+				.map(move |parsed_term| elaborate(context.clone(), parsed_term, None))
+				.collect::<Option<Vec<_>>>()
+				.map(|v| v.into_iter().map(|expression| (expression.clone(), expression.ty)).unzip())?;
+
+			Some(BaseExpression {
+				term: BaseTerm::Tuple(expressions),
+				ty: BaseType::Product(tys),
+			})
+		},
+		(None, ParsedTerm::Projection { tuple, index }) => {
+			let tuple = elaborate(context, *tuple, None)?;
+			match tuple.ty.clone() {
+				// FIXME: The redundancy present here is probably a good clue that we shouldn't annotate types this explicitly in the typed tree...?
+				BaseType::Product(product) => Some(BaseExpression {
+					term: BaseTerm::Projection {
+						tuple: Box::new(tuple),
+						index,
+					},
+					ty: product.get(index)?.clone(),
+				}),
+				_ => None,
+			}
+		},
 		(
 			None,
 			ParsedTerm::Function {

@@ -17,9 +17,12 @@ use crate::{
 enum Nonterminal {
 	Value,
 	DelimitedValue,
+	SmallValue,
 	AppliedValue,
+	ValueList,
 	Type,
 	DelimitedType,
+	TypeList,
 	Cases,
 }
 
@@ -28,6 +31,7 @@ impl_downset_for_repr_enum![Nonterminal ~ u8];
 #[derive(Clone, Debug)]
 pub enum ParsedType {
 	Name(String),
+	Product(Vec<Self>),
 	Power { domain: Box<Self>, codomain: Box<Self> },
 	Polarity,
 	Integer,
@@ -38,6 +42,11 @@ pub enum ParsedTerm {
 	Polarity(bool),
 	Integer(i64),
 	Name(String),
+	Tuple(Vec<Self>),
+	Projection {
+		tuple: Box<Self>,
+		index: usize,
+	},
 	Function {
 		parameter: String,
 		domain: ParsedType,
@@ -77,6 +86,8 @@ pub enum Node {
 	Term(ParsedTerm),
 	Type(ParsedType),
 	Cases(ParsedCases),
+	ValueList(Vec<ParsedTerm>),
+	TypeList(Vec<ParsedType>),
 	Fail,
 }
 
@@ -130,6 +141,20 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 		},
 		Nonterminal::DelimitedValue => {
 			match_slice! { pattern;
+				[Nx(Node::Term(term))] => {
+					Node::Term(term)
+				},
+				[Tx(OpenCurly), Tx(Name(parameter)), Nx(Node::Type(domain)), Tx(CloseCurly), Tx(Arrow), Nx(Node::Type(codomain)), Nx(Node::Term(body))] => {
+					Node::Term(ParsedTerm::Function { parameter, domain, codomain, body: Box::new(body) })
+				},
+				[Tx(OpenCurly), Tx(Name(binding)), Tx(Arrova), Tx(CloseCurly), Nx(Node::Term(body))] => {
+					Node::Term(ParsedTerm::Fixpoint { binding, body: Box::new(body) })
+				},
+				_ => Node::Fail,
+			}
+		},
+		Nonterminal::SmallValue => {
+			match_slice! { pattern;
 				[Tx(IntegerLiteral(integer))] => {
 					Node::Term(ParsedTerm::Integer(integer))
 				},
@@ -140,14 +165,30 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 						_ => Node::Term(ParsedTerm::Name(name)),
 					}
 				},
+				[Tx(OpenParen), Nx(Node::ValueList(list)), Tx(CloseParen)] => {
+					Node::Term(ParsedTerm::Tuple(list))
+				},
+				[Nx(Node::Term(tuple)), Tx(Period), Tx(IntegerLiteral(integer))] => {
+					if let Some(index) = usize::try_from(integer).ok() {
+						Node::Term(ParsedTerm::Projection { tuple: Box::new(tuple), index })
+					} else {
+						Node::Fail
+					}
+				},
 				[Tx(OpenOrtho), Nx(Node::Term(term)), Tx(CloseOrtho)] => {
 					Node::Term(term)
 				},
-				[Tx(OpenCurly), Tx(Name(parameter)), Nx(Node::Type(domain)), Tx(CloseCurly), Tx(Arrow), Nx(Node::Type(codomain)), Nx(Node::Term(body))] => {
-					Node::Term(ParsedTerm::Function { parameter, domain, codomain, body: Box::new(body) })
-				},
-				[Tx(OpenCurly), Tx(Name(binding)), Tx(Arrova), Tx(CloseCurly), Nx(Node::Term(body))] => {
-					Node::Term(ParsedTerm::Fixpoint { binding, body: Box::new(body) })
+				_ => Node::Fail,
+			}
+		},
+		Nonterminal::ValueList => {
+			match_slice! { pattern;
+				[] => Node::ValueList(Vec::new()),
+				[Nx(Node::Term(term))] => Node::ValueList(Vec::from([term])),
+				[Nx(Node::ValueList(list)), Tx(Comma), Nx(Node::Term(term))] => {
+					let mut list = list;
+					list.push(term);
+					Node::ValueList(list)
 				},
 				_ => Node::Fail,
 			}
@@ -186,6 +227,21 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 						_ => Node::Type(ParsedType::Name(name)),
 					}
 				},
+				[Tx(Asterisk), Tx(OpenParen), Nx(Node::TypeList(list)), Tx(CloseParen)] => {
+					Node::Type(ParsedType::Product(list))
+				},
+				_ => Node::Fail,
+			}
+		},
+		Nonterminal::TypeList => {
+			match_slice! { pattern;
+				[] => Node::TypeList(Vec::new()),
+				[Nx(Node::Type(ty))] => Node::TypeList(Vec::from([ty])),
+				[Nx(Node::TypeList(list)), Tx(Comma), Nx(Node::Type(ty))] => {
+					let mut list = list;
+					list.push(ty);
+					Node::TypeList(list)
+				},
 				_ => Node::Fail,
 			}
 		},
@@ -214,11 +270,22 @@ impl Parser {
 				[@AppliedValue, @DelimitedValue], // Function Application
 			]
 			DelimitedValue => [
-				[!IntegerLiteral],
-				[!Name],
-				[!OpenOrtho, @Value, !CloseOrtho],
+				[@SmallValue],
 				[!OpenCurly, !Name, @Type, !CloseCurly, !Arrow, @DelimitedType, @DelimitedValue],   // Lambda binding
 				[!OpenCurly, !Name, !Arrova, !CloseCurly, @DelimitedValue], // Mu binding
+			]
+			SmallValue => [
+				[!IntegerLiteral],
+				[!Name],
+				[!OpenParen, @ValueList, !CloseParen],
+				// FIXME: Use natural literals instead.
+				[@SmallValue, !Period, !IntegerLiteral],
+				[!OpenOrtho, @Value, !CloseOrtho],
+			]
+			ValueList => [
+				[],
+				[@Value],
+				[@ValueList, !Comma, @Value],
 			]
 			Cases => [
 				[],                                               // Empty cases
@@ -230,6 +297,12 @@ impl Parser {
 			]
 			DelimitedType => [
 				[!Name],
+				[!Asterisk, !OpenParen, @TypeList, !CloseParen],
+			]
+			TypeList => [
+				[],
+				[@Type],
+				[@TypeList, !Comma, @Type],
 			]
 		];
 		Ok(Self {

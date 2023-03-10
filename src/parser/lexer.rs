@@ -10,15 +10,20 @@ create_token_and_terminal_types! {
 	pub enum Token {
 		Arrova,
 		Arrow,
+		Asterisk,
 		Bar,
 		Bicolon,
 		CloseCurly,
 		CloseOrtho,
+		CloseParen,
+		Comma,
 		EqualsQuestion,
 		IntegerLiteral(i64),
 		Name(String),
 		OpenCurly,
 		OpenOrtho,
+		OpenParen,
+		Period,
 		Question,
 	}
 
@@ -141,6 +146,7 @@ impl<'source> Iterator for Lexer<'source> {
 				.next_if_eq(&'>')
 				.map(|_| Ok(Arrow))
 				.unwrap_or_else(|| lex_integer('-', &mut self.scanner)),
+			'*' => Ok(Asterisk),
 			'|' => Ok(Bar),
 			':' => self.scanner.next_if_eq(&':').map(|_| Ok(Bicolon)).unwrap_or_else(|| {
 				Err(UnknownLexeme {
@@ -151,6 +157,8 @@ impl<'source> Iterator for Lexer<'source> {
 			}),
 			'}' => Ok(CloseCurly),
 			']' => Ok(CloseOrtho),
+			')' => Ok(CloseParen),
+			',' => Ok(Comma),
 			'=' => self.scanner.next_if_eq(&'?').map(|_| Ok(EqualsQuestion)).unwrap_or_else(|| {
 				Err(UnknownLexeme {
 					lexeme: "=".to_owned(),
@@ -160,6 +168,8 @@ impl<'source> Iterator for Lexer<'source> {
 			}),
 			'{' => Ok(OpenCurly),
 			'[' => Ok(OpenOrtho),
+			'(' => Ok(OpenParen),
+			'.' => Ok(Period),
 			'?' => Ok(Question),
 			x if x.is_ascii_alphabetic() => Ok(lex_name(x, &mut self.scanner)),
 			x if x.is_ascii_digit() || x == '+' => lex_integer(x, &mut self.scanner),

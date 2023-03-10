@@ -12,6 +12,7 @@ pub struct RecursiveFunction {
 pub enum BaseValue {
 	Polarity(bool),
 	Integer(i64),
+	Tuple(Vec<Self>),
 	Function(Arc<dyn (Fn(Self) -> Option<Self>)>),
 	RecursiveFunction(RecursiveFunction),
 }
@@ -21,6 +22,7 @@ impl core::fmt::Debug for BaseValue {
 		match self {
 			Self::Polarity(x) => f.write_str(&x.to_string()),
 			Self::Integer(x) => f.write_str(&x.to_string()),
+			Self::Tuple(x) => x.as_slice().fmt(f),
 			Self::Function(_) => f.write_str("<function>"),
 			Self::RecursiveFunction(_) => f.write_str("<recursive function>"),
 		}
@@ -63,6 +65,20 @@ pub fn interpret_base(base_term: BaseExpression, environment: BaseEnvironment) -
 		Polarity(x) => Some(BaseValue::Polarity(x)),
 		Integer(x) => Some(BaseValue::Integer(x)),
 		Name(name) => environment.lookup(&name),
+		Tuple(tuple) => Some(BaseValue::Tuple(
+			tuple
+				.into_iter()
+				.map(|expression| interpret_base(expression, environment.clone()))
+				.collect::<Option<_>>()?,
+		)),
+		Projection { tuple, index } => {
+			let tuple = interpret_base(*tuple, environment)?;
+			if let BaseValue::Tuple(tuple) = tuple {
+				tuple.get(index).cloned()
+			} else {
+				None
+			}
+		},
 		Function {
 			fixpoint_name,
 			parameter,

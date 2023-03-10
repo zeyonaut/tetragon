@@ -1,13 +1,13 @@
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum CypressVariable {
 	Auto(u64),
 	Name(String),
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct CypressLabel(pub u64);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum CypressType {
 	Unity,
 	Polarity,
@@ -15,16 +15,19 @@ pub enum CypressType {
 	Power { domain: Box<Self>, codomain: Box<Self> },
 }
 
+#[derive(Debug)]
 pub enum CypressValue {
 	Unity,
 	Polarity(bool),
 	Integer(i64),
 }
 
+#[derive(Debug)]
 pub enum CypressOperation {
 	EqualsQuery([CypressVariable; 2]),
 }
 
+#[derive(Debug)]
 pub enum CypressTerm {
 	AssignValue {
 		binding: CypressVariable,
@@ -51,7 +54,7 @@ pub enum CypressTerm {
 	DeclareContinuation {
 		label: CypressLabel,
 		domain: CypressType,
-		argument: CypressVariable,
+		parameter: CypressVariable,
 		body: Box<Self>,
 		rest: Box<Self>,
 	},
@@ -76,6 +79,6 @@ pub enum CypressTerm {
 
 impl CypressTerm {
 	pub fn interpret(self) -> CypressValue {
-		todo!()
+		unimplemented!()
 	}
 }
