@@ -107,7 +107,6 @@ pub fn convert_expression_to_cps(
 			body,
 		} => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
-			let continuation = CypressLabel(symbol_generator.fresh());
 			let parameter = CypressVariable::Name(parameter);
 
 			let (body_variable, body_context) = convert_expression_to_cps(*body, symbol_generator)?;
@@ -122,10 +121,9 @@ pub fn convert_expression_to_cps(
 					fixpoint_name: fixpoint_name.clone().map(|name| CypressVariable::Name(name)),
 					domain: domain.clone(),
 					codomain: codomain.clone(),
-					continuation,
 					parameter: parameter.clone(),
 					body: Box::new(body_context(CypressTerm::Continue {
-						label: continuation,
+						label: None,
 						argument: body_variable.clone(),
 					})),
 					rest: Box::new(rest),
@@ -135,7 +133,7 @@ pub fn convert_expression_to_cps(
 		BaseTerm::Application { function, argument } => {
 			// TODO: Handle intrinsic functions as operations instead. Maybe? Or how long can I delay the introduction of intrinsics?
 			let outcome = CypressVariable::Auto(symbol_generator.fresh());
-			let continuation = CypressLabel(symbol_generator.fresh());
+			let continuation = symbol_generator.fresh();
 
 			let (function_variable, function_context) = convert_expression_to_cps(*function, symbol_generator)?;
 			let (argument_variable, argument_context) = convert_expression_to_cps(*argument, symbol_generator)?;
@@ -164,7 +162,7 @@ pub fn convert_expression_to_cps(
 			definition,
 			rest,
 		} => {
-			let continuation = CypressLabel(symbol_generator.fresh());
+			let continuation = symbol_generator.fresh();
 
 			let (definition_variable, definition_context) = convert_expression_to_cps((*definition).clone(), symbol_generator)?;
 			let (rest_variable, rest_context) = convert_expression_to_cps(*rest, symbol_generator)?;
@@ -179,7 +177,7 @@ pub fn convert_expression_to_cps(
 					parameter: CypressVariable::Name(assignee.clone()),
 					body: Box::new(rest_context(body)),
 					rest: Box::new(definition_context(CypressTerm::Continue {
-						label: continuation,
+						label: Some(continuation),
 						argument: definition_variable.clone(),
 					})),
 				}),
@@ -203,11 +201,11 @@ pub fn convert_expression_to_cps(
 			))
 		},
 		BaseTerm::CaseSplit { scrutinee, cases } => {
-			let outcome_continuation = CypressLabel(symbol_generator.fresh());
+			let outcome_continuation = symbol_generator.fresh();
 			let outcome_parameter = CypressVariable::Auto(symbol_generator.fresh());
-			let yes_continuation = CypressLabel(symbol_generator.fresh());
+			let yes_continuation = symbol_generator.fresh();
 			let yes_parameter = CypressVariable::Auto(symbol_generator.fresh());
-			let no_continuation = CypressLabel(symbol_generator.fresh());
+			let no_continuation = symbol_generator.fresh();
 			let no_parameter = CypressVariable::Auto(symbol_generator.fresh());
 
 			let mut yes_term = None;
@@ -240,7 +238,7 @@ pub fn convert_expression_to_cps(
 						domain: CypressType::Unity,
 						parameter: yes_parameter.clone(),
 						body: Box::new(yes_context(CypressTerm::Continue {
-							label: outcome_continuation,
+							label: Some(outcome_continuation),
 							argument: yes_variable.clone(),
 						})),
 						rest: Box::new(CypressTerm::DeclareContinuation {
@@ -248,7 +246,7 @@ pub fn convert_expression_to_cps(
 							domain: CypressType::Unity,
 							parameter: no_parameter.clone(),
 							body: Box::new(no_context(CypressTerm::Continue {
-								label: outcome_continuation,
+								label: Some(outcome_continuation),
 								argument: no_variable.clone(),
 							})),
 							rest: Box::new(scrutinee_context(CypressTerm::CaseSplit {

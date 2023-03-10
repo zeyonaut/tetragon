@@ -8,8 +8,7 @@ pub enum CypressVariable {
 	Name(String),
 }
 
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-pub struct CypressLabel(pub u64);
+pub type CypressLabel = u64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CypressType {
@@ -91,7 +90,6 @@ pub enum CypressTerm {
 		fixpoint_name: Option<CypressVariable>,
 		domain: CypressType,
 		codomain: CypressType,
-		continuation: CypressLabel,
 		parameter: CypressVariable,
 		body: Box<Self>,
 		rest: Box<Self>,
@@ -114,7 +112,7 @@ pub enum CypressTerm {
 		argument: CypressVariable,
 	},
 	Continue {
-		label: CypressLabel,
+		label: Option<CypressLabel>,
 		argument: CypressVariable,
 	},
 	Halt {
@@ -125,7 +123,6 @@ pub enum CypressTerm {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CypressFunction {
 	fixpoint_variable: Option<CypressVariable>,
-	returner: CypressLabel,
 	parameter: CypressVariable,
 	body: CypressTerm,
 	variables: HashMap<CypressVariable, CypressValue>,
@@ -144,6 +141,7 @@ impl CypressTerm {
 		let mut term = self;
 		let mut variables: HashMap<CypressVariable, CypressValue> = HashMap::new();
 		let mut continuations: HashMap<CypressLabel, Arc<CypressContinuation>> = HashMap::new();
+		let mut returners: Vec<Arc<CypressContinuation>> = Vec::new();
 
 		insert_intrinsics(&mut variables);
 
@@ -177,7 +175,6 @@ impl CypressTerm {
 					fixpoint_name,
 					domain: _,
 					codomain: _,
-					continuation,
 					parameter,
 					body,
 					rest,
@@ -186,7 +183,6 @@ impl CypressTerm {
 						binding,
 						CypressValue::Function(Arc::new(CypressFunction {
 							fixpoint_variable: fixpoint_name,
-							returner: continuation,
 							parameter,
 							body: *body,
 							variables: variables.clone(),
@@ -243,12 +239,12 @@ impl CypressTerm {
 					let function = variables.get(&function_variable)?;
 					if let CypressValue::Function(function) = function {
 						let mut next_variables = function.variables.clone();
-						let mut next_continuations = HashMap::new();
+						let next_continuations = HashMap::new();
 						next_variables.insert(function.parameter.clone(), variables.get(&argument)?.clone());
 						if let Some(fixpoint_variable) = &function.fixpoint_variable {
 							next_variables.insert(fixpoint_variable.clone(), CypressValue::Function(function.clone()));
 						}
-						next_continuations.insert(function.returner.clone(), continuations.get(&returner_label)?.clone());
+						returners.push(continuations.get(&returner_label)?.clone());
 
 						term = function.body.clone();
 
@@ -264,11 +260,13 @@ impl CypressTerm {
 					}
 				},
 				CypressTerm::Continue { label, argument } => {
-					let continuation = continuations.get(&label)?;
+					let continuation = label.and_then(|label| continuations.get(&label).cloned()).or_else(|| returners.pop())?;
 					let mut next_variables = continuation.variables.clone();
 					let mut next_continuations = continuation.continuations.clone();
 					next_variables.insert(continuation.parameter.clone(), variables.get(&argument)?.clone());
-					next_continuations.insert(label, continuation.clone());
+					if let Some(label) = label {
+						next_continuations.insert(label, continuation.clone());
+					}
 
 					// NOTE: The following two loops are used to support tuples. I'm not entirely sure that these scoping rules are technically correct...
 					for (variable, value) in variables {
@@ -285,21 +283,17 @@ impl CypressTerm {
 	}
 }
 
-// FIXME: Figure out something saner for the returner labels (they need to be globally unique, or at least... (wait, why do they have to be unique again? Experimentally, it doesn't work if they aren't, but why doesn't it work?))
-// Can we use `None` for returners?
 fn insert_intrinsics(functions: &mut HashMap<CypressVariable, CypressValue>) {
 	functions.insert(
 		CypressVariable::Name("add".to_owned()),
 		CypressValue::Function(Arc::new(CypressFunction {
 			fixpoint_variable: None,
-			returner: CypressLabel(10000),
 			parameter: CypressVariable::Name("left".to_owned()),
 			body: CypressTerm::DeclareFunction {
 				binding: CypressVariable::Name("add_inner".to_owned()),
 				fixpoint_name: None,
 				domain: CypressType::Integer,
 				codomain: CypressType::Integer,
-				continuation: CypressLabel(10001),
 				parameter: CypressVariable::Name("right".to_owned()),
 				body: Box::new(CypressTerm::AssignOperation {
 					binding: CypressVariable::Name("output".to_owned()),
@@ -309,12 +303,12 @@ fn insert_intrinsics(functions: &mut HashMap<CypressVariable, CypressValue>) {
 						CypressVariable::Name("right".to_owned()),
 					]),
 					rest: Box::new(CypressTerm::Continue {
-						label: CypressLabel(10001),
+						label: None,
 						argument: CypressVariable::Name("output".to_owned()),
 					}),
 				}),
 				rest: Box::new(CypressTerm::Continue {
-					label: CypressLabel(10000),
+					label: None,
 					argument: CypressVariable::Name("add_inner".to_owned()),
 				}),
 			},
