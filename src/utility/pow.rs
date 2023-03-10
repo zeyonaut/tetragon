@@ -14,7 +14,7 @@ pub trait Downset {
 // This may be used to implement Downset for enums which are represented by a subtype of usize.
 macro_rules! impl_downset_for_repr_enum {
 	[$enum:ident ~ $repr:ident] => {
-		impl $crate::util::pow::Downset for $enum {
+		impl $crate::utility::pow::Downset for $enum {
 			const SIZE: usize = ::core::mem::variant_count::<Self>();
 			fn from_usize(index: usize) -> Self {
 				// SAFETY: The caller must ensure that any number in 0..Self::SIZE is a valid $enum.
@@ -89,7 +89,7 @@ where
 
 macro_rules! pow {
 	[$($token_trees:tt)*] => {
-		$crate::util::pow::Pow::new(|_76e5cca5354f477f9fc05eaafc5c071e| match _76e5cca5354f477f9fc05eaafc5c071e {
+		$crate::utility::pow::Pow::new(|_76e5cca5354f477f9fc05eaafc5c071e| match _76e5cca5354f477f9fc05eaafc5c071e {
 			$($token_trees)*
 		})
 	};

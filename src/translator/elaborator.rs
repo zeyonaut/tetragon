@@ -1,4 +1,4 @@
-use crate::{parser::parser::*, util::slice::match_slice};
+use crate::{parser::parser::*, utility::slice::match_slice};
 
 // TODO: Does this need to be generic? Well, I guess we'll see.
 #[derive(Clone, Debug, PartialEq, Eq)]

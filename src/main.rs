@@ -25,8 +25,8 @@ mod interpreter;
 mod parser;
 #[path = "translator/_.rs"]
 mod translator;
-#[path = "util/_.rs"]
-mod util;
+#[path = "utility/_.rs"]
+mod utility;
 
 use std::sync::Arc;
 
@@ -38,7 +38,7 @@ use parser::{
 	parser::{Node, Parser},
 };
 use translator::elaborator::{elaborate, BaseType, Context};
-use util::*;
+use utility::*;
 
 use crate::{
 	interpreter::base::{BaseEnvironment, BaseValue},

@@ -3,7 +3,7 @@ use std::{iter::Peekable, str::Chars};
 use enum_iterator::Sequence;
 use thiserror::Error;
 
-use crate::{generator::terminal::*, util::pow::impl_downset_for_repr_enum};
+use crate::{generator::terminal::*, utility::pow::impl_downset_for_repr_enum};
 
 create_token_and_terminal_types! {
 	#[derive(Debug)]

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use enum_iterator::Sequence;
 
-use crate::util::{fix::fix, pow::*, slice::*};
+use crate::utility::{fix::fix, pow::*, slice::*};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Sequence)]
 pub enum Symbol<N, T> {
@@ -133,7 +133,7 @@ macro_rules! grammar {
 
 	// Entry: Parse a list of grammar rules.
 	[$start:expr; $($key:pat => [$([$($kind:tt $symbol:expr),* $(,)?]),* $(,)?] $(,)?)*] => ({
-		use $crate::util::{pow::pow, slice::slice};
+		use $crate::utility::{pow::pow, slice::slice};
 		$crate::generator::grammar::Grammar::new($start, pow! {
 			$($key => slice![$(slice![$(grammar![@symbol $kind $symbol]),*]),*]),*
 		})

@@ -7,7 +7,7 @@ use std::{
 use enum_iterator::Sequence;
 use thiserror::Error;
 
-use crate::{fix::fix, pow::*, slice::slice, terminal::HasTerminal, util::slice::Slice, *};
+use crate::{fix::fix, pow::*, slice::slice, terminal::HasTerminal, utility::slice::Slice, *};
 
 // An LR(1) item is an LR(0) item with an additional sentinel;
 // Successful completion requires that the sentinel is observed.
@@ -75,7 +75,7 @@ macro_rules! lr1_item {
 
 	// Entry
 	[$cursor:expr; $target:tt -> $($kind:tt $symbol:expr),* $(,)?; $sentinel:tt] => ({
-		use crate::util::slice::slice;
+		use crate::utility::slice::slice;
 		$crate::generator::lalr1::Item::new($crate::generator::lr0::Item::new_at($crate::generator::grammar::Production::new(lr1_item![@target $target], slice![$(lr1_item![@symbol $kind $symbol]),*]), $cursor), lr1_item![@target $sentinel])
 	});
 }
@@ -546,7 +546,7 @@ mod tests {
 			grammar::grammar,
 			lalr1::{self, GenerateParserError},
 		},
-		util::pow::impl_downset_for_repr_enum,
+		utility::pow::impl_downset_for_repr_enum,
 	};
 
 	// Figure 4.47, p. 275

@@ -111,7 +111,7 @@ macro_rules! lr0_item {
 
 	// Entry
 	[$cursor:expr; $target:tt -> $($kind:tt $symbol:expr),* $(,)?] => ({
-		use $crate::util::slice::slice;
+		use $crate::utility::slice::slice;
 		$crate::lr0::Item::new_at($crate::grammar::Production::new(lr0_item![@target $target], slice![$(lr0_item![@symbol $kind $symbol]),*]), $cursor)
 	});
 }

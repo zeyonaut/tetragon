@@ -6,7 +6,7 @@ use crate::{
 		grammar::{grammar, Symbol},
 		lalr1::{self, GenerateParserError, ParseError},
 	},
-	util::{
+	utility::{
 		pow::impl_downset_for_repr_enum,
 		slice::{match_slice, Slice},
 	},

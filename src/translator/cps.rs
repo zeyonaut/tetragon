@@ -1,7 +1,5 @@
-use std::sync::Arc;
-
 use super::elaborator::*;
-use crate::{interpreter::cypress::*, util::composite::apply_composed};
+use crate::{interpreter::cypress::*, utility::composite::apply_composed};
 
 pub struct SymbolGenerator(u64);
 
