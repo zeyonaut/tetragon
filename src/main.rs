@@ -75,6 +75,7 @@ fn main() {
 		)
 		.expect("Elaboration failed.");
 
+		/*
 		let interpreted_value = interpret_base(
 			elaborated_expression.clone(),
 			BaseEnvironment::new(vec![(
@@ -90,10 +91,13 @@ fn main() {
 		);
 
 		println!("Interpreted value: {:#?}", interpreted_value);
+		*/
+		
+		let cypress_term = convert_program_to_cps(elaborated_expression).expect("Failed to convert base term to CPS.");
 
-		let cypress_term = convert_program_to_cps(elaborated_expression);
+		let cypress_value = cypress_term.evaluate().expect("Failed to evaluate CPS term.");
 
-		println!("CPS-converted term: {:#?}", cypress_term);
+		println!("CPS-converted value: {:#?}", cypress_value);
 	} else {
 		panic!("Not a term");
 	}

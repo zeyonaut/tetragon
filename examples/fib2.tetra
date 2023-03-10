@@ -6,4 +6,4 @@ fib2 :: {self @} {n Int} -> * (Int, Int) [
 		(prev.1, add prev.0 prev.1)
 	]
 ]
-[fib2 25].0
+[fib2 50].0

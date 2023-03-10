@@ -71,10 +71,9 @@ pub fn convert_expression_to_cps(
 				Box::new(move |body| {
 					apply_composed(
 						part_contexts.iter().map(AsRef::as_ref).rev(),
-						CypressTerm::AssignValue {
+						CypressTerm::AssignOperation {
 							binding: binding.clone(),
-							ty: CypressType::Integer,
-							value: CypressValue::Tuple(part_variables.clone()),
+							operation: CypressOperation::Pair(part_variables.clone().into_boxed_slice()),
 							rest: Box::new(body),
 						},
 					)
@@ -93,7 +92,7 @@ pub fn convert_expression_to_cps(
 				Box::new(move |body| {
 					tuple_context(CypressTerm::AssignOperation {
 						binding: binding.clone(),
-						ty: outcome_ty.clone(),
+						//ty: outcome_ty.clone(),
 						operation: CypressOperation::Projection(tuple_variable.clone(), index),
 						rest: Box::new(body),
 					})
@@ -119,14 +118,14 @@ pub fn convert_expression_to_cps(
 			Some((
 				binding.clone(),
 				Box::new(move |rest| CypressTerm::DeclareFunction {
-					fixpoint_name: fixpoint_name.clone(),
 					binding: binding.clone(),
+					fixpoint_name: fixpoint_name.clone().map(|name| CypressVariable::Name(name)),
 					domain: domain.clone(),
 					codomain: codomain.clone(),
 					continuation,
 					parameter: parameter.clone(),
 					body: Box::new(body_context(CypressTerm::Continue {
-						continuation,
+						label: continuation,
 						argument: body_variable.clone(),
 					})),
 					rest: Box::new(rest),
@@ -135,8 +134,8 @@ pub fn convert_expression_to_cps(
 		},
 		BaseTerm::Application { function, argument } => {
 			// TODO: Handle intrinsic functions as operations instead. Maybe? Or how long can I delay the introduction of intrinsics?
-			let continuation = CypressLabel(symbol_generator.fresh());
 			let outcome = CypressVariable::Auto(symbol_generator.fresh());
+			let continuation = CypressLabel(symbol_generator.fresh());
 
 			let (function_variable, function_context) = convert_expression_to_cps(*function, symbol_generator)?;
 			let (argument_variable, argument_context) = convert_expression_to_cps(*argument, symbol_generator)?;
@@ -180,7 +179,7 @@ pub fn convert_expression_to_cps(
 					parameter: CypressVariable::Name(assignee.clone()),
 					body: Box::new(rest_context(body)),
 					rest: Box::new(definition_context(CypressTerm::Continue {
-						continuation,
+						label: continuation,
 						argument: definition_variable.clone(),
 					})),
 				}),
@@ -196,7 +195,7 @@ pub fn convert_expression_to_cps(
 				Box::new(move |body| {
 					left_context(right_context(CypressTerm::AssignOperation {
 						binding: binding.clone(),
-						ty: CypressType::Polarity,
+						//ty: CypressType::Polarity,
 						operation: CypressOperation::EqualsQuery([left_variable.clone(), right_variable.clone()]),
 						rest: Box::new(body),
 					}))
@@ -241,7 +240,7 @@ pub fn convert_expression_to_cps(
 						domain: CypressType::Unity,
 						parameter: yes_parameter.clone(),
 						body: Box::new(yes_context(CypressTerm::Continue {
-							continuation: outcome_continuation,
+							label: outcome_continuation,
 							argument: yes_variable.clone(),
 						})),
 						rest: Box::new(CypressTerm::DeclareContinuation {
@@ -249,7 +248,7 @@ pub fn convert_expression_to_cps(
 							domain: CypressType::Unity,
 							parameter: no_parameter.clone(),
 							body: Box::new(no_context(CypressTerm::Continue {
-								continuation: outcome_continuation,
+								label: outcome_continuation,
 								argument: no_variable.clone(),
 							})),
 							rest: Box::new(scrutinee_context(CypressTerm::CaseSplit {
