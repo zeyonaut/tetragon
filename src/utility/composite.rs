@@ -1,7 +1,4 @@
-pub fn apply_composed<'a, T>(mut functions: impl Iterator<Item = &'a dyn Fn(T) -> T>, x: T) -> T
-where
-	T: 'a,
-{
+pub fn apply_composed<T>(mut functions: impl Iterator<Item = Box<dyn FnOnce(T) -> T>>, x: T) -> T {
 	if let Some(function) = functions.next() {
 		apply_composed(functions, function(x))
 	} else {

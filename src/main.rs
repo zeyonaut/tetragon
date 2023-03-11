@@ -69,13 +69,25 @@ fn main() {
 						codomain: Box::new(BaseType::Integer),
 					}),
 				},
+			), (
+				"add2".to_owned(),
+				BaseType::Power {
+					domain: Box::new(BaseType::Product(Vec::from([BaseType::Integer, BaseType::Integer]))),
+					codomain: Box::new(BaseType::Integer),
+				},
 			)]),
 			parsed_term,
 			None,
 		)
 		.expect("Elaboration failed.");
+	
+		// println!("Elaborated term: {:#?}", elaborated_expression);
+
+		use std::time::Instant;
 
 		/*
+		let now = Instant::now();  
+		
 		let interpreted_value = interpret_base(
 			elaborated_expression.clone(),
 			BaseEnvironment::new(vec![(
@@ -90,12 +102,22 @@ fn main() {
 			)]),
 		);
 
+		let elapsed = now.elapsed();
+		println!("Elapsed (Base): {:.2?}", elapsed);
+		
 		println!("Interpreted value: {:#?}", interpreted_value);
 		*/
 		
 		let cypress_term = convert_program_to_cps(elaborated_expression).expect("Failed to convert base term to CPS.");
 
+		// println!("CPS-converted term: {:#?}", cypress_term);
+
+		let now = Instant::now();  
+
 		let cypress_value = cypress_term.evaluate().expect("Failed to evaluate CPS term.");
+
+		let elapsed = now.elapsed();
+		println!("Elapsed (CPS): {:.2?}", elapsed);
 
 		println!("CPS-converted value: {:#?}", cypress_value);
 	} else {

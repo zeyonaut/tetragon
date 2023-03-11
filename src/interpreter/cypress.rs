@@ -55,17 +55,13 @@ impl CypressOperation {
 					None
 				}
 			},
-			CypressOperation::Pair(parts) => {
-				let parts = parts
+			CypressOperation::Pair(parts) => Some(Tuple(
+				parts
 					.as_ref()
 					.into_iter()
-					.map(|variable| variables.get(&variable))
-					.collect::<Option<Vec<_>>>()?
-					.into_iter()
-					.cloned()
-					.collect();
-				Some(Tuple(parts))
-			},
+					.map(|variable| variables.get(&variable).cloned())
+					.collect::<Option<Vec<_>>>()?,
+			)),
 		}
 	}
 }
@@ -108,7 +104,7 @@ pub enum CypressTerm {
 	}, // Continuations should have unit domain. (For now.) Scrutinee should be a polarity.
 	Apply {
 		function: CypressVariable,
-		continuation: CypressLabel,
+		continuation: Option<CypressLabel>,
 		argument: CypressVariable,
 	},
 	Continue {
@@ -146,6 +142,7 @@ impl CypressTerm {
 		insert_intrinsics(&mut variables);
 
 		loop {
+			//println!("Return stack: {}", returners.len());
 			match term.clone() {
 				CypressTerm::AssignValue {
 					binding,
@@ -221,8 +218,6 @@ impl CypressTerm {
 						let continuation_label = if *scrutinee { yes_continuation } else { no_continuation };
 
 						let continuation = continuations.get(&continuation_label)?;
-						// FIXME: It's dirty, but we'll just forget about the argument for now. It's trivial and would have to be fresh, anyway.
-						// NOTE: We presume that branch continuations are never recursive, too.
 
 						term = continuation.body.clone();
 						(variables, continuations) = (continuation.variables.clone(), continuation.continuations.clone());
@@ -244,14 +239,11 @@ impl CypressTerm {
 						if let Some(fixpoint_variable) = &function.fixpoint_variable {
 							next_variables.insert(fixpoint_variable.clone(), CypressValue::Function(function.clone()));
 						}
-						returners.push(continuations.get(&returner_label)?.clone());
+						if let Some(returner_label) = returner_label {
+							returners.push(continuations.get(&returner_label)?.clone());
+						}
 
 						term = function.body.clone();
-
-						// NOTE: The following two loops are used to support tuples. I'm not entirely sure that these scoping rules are technically correct...
-						for (variable, value) in variables {
-							next_variables.entry(variable).or_insert(value);
-						}
 
 						(variables, continuations) = (next_variables, next_continuations);
 						continue;
@@ -260,17 +252,19 @@ impl CypressTerm {
 					}
 				},
 				CypressTerm::Continue { label, argument } => {
-					let continuation = label.and_then(|label| continuations.get(&label).cloned()).or_else(|| returners.pop())?;
+					let continuation = if let Some(label) = label {
+						continuations.get(&label).cloned()?
+					} else if let Some(returner) = returners.pop() {
+						returner
+					} else {
+						break variables.get(&argument).cloned();
+					};
+
 					let mut next_variables = continuation.variables.clone();
 					let mut next_continuations = continuation.continuations.clone();
 					next_variables.insert(continuation.parameter.clone(), variables.get(&argument)?.clone());
 					if let Some(label) = label {
 						next_continuations.insert(label, continuation.clone());
-					}
-
-					// NOTE: The following two loops are used to support tuples. I'm not entirely sure that these scoping rules are technically correct...
-					for (variable, value) in variables {
-						next_variables.entry(variable).or_insert(value);
 					}
 
 					term = continuation.body.clone();
@@ -283,8 +277,8 @@ impl CypressTerm {
 	}
 }
 
-fn insert_intrinsics(functions: &mut HashMap<CypressVariable, CypressValue>) {
-	functions.insert(
+fn insert_intrinsics(variables: &mut HashMap<CypressVariable, CypressValue>) {
+	variables.insert(
 		CypressVariable::Name("add".to_owned()),
 		CypressValue::Function(Arc::new(CypressFunction {
 			fixpoint_variable: None,
@@ -310,6 +304,33 @@ fn insert_intrinsics(functions: &mut HashMap<CypressVariable, CypressValue>) {
 				rest: Box::new(CypressTerm::Continue {
 					label: None,
 					argument: CypressVariable::Name("add_inner".to_owned()),
+				}),
+			},
+			variables: HashMap::new(),
+		})),
+	);
+	variables.insert(
+		CypressVariable::Name("add2".to_owned()),
+		CypressValue::Function(Arc::new(CypressFunction {
+			fixpoint_variable: None,
+			parameter: CypressVariable::Name("tup".to_owned()),
+			body: CypressTerm::AssignOperation {
+				binding: CypressVariable::Name("left".to_owned()),
+				operation: CypressOperation::Projection(CypressVariable::Name("tup".to_owned()), 0),
+				rest: Box::new(CypressTerm::AssignOperation {
+					binding: CypressVariable::Name("right".to_owned()),
+					operation: CypressOperation::Projection(CypressVariable::Name("tup".to_owned()), 1),
+					rest: Box::new(CypressTerm::AssignOperation {
+						binding: CypressVariable::Name("output".to_owned()),
+						operation: CypressOperation::Add([
+							CypressVariable::Name("left".to_owned()),
+							CypressVariable::Name("right".to_owned()),
+						]),
+						rest: Box::new(CypressTerm::Continue {
+							label: None,
+							argument: CypressVariable::Name("output".to_owned()),
+						}),
+					}),
 				}),
 			},
 			variables: HashMap::new(),
