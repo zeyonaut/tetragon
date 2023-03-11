@@ -1,15 +1,13 @@
+use super::symbol::*;
 use crate::{
 	interpreter::{base::*, cypress::*},
 	utility::composite::apply_composed,
 };
 
-pub struct SymbolGenerator(u64);
-
-impl SymbolGenerator {
-	pub fn fresh(&mut self) -> u64 {
-		let symbol = self.0;
-		self.0 += 1;
-		symbol
+pub fn convert_variable_to_cps(variable: BaseVariable) -> CypressVariable {
+	match variable {
+		BaseVariable::Auto(x) => CypressVariable::Auto(x),
+		BaseVariable::Name(x) => CypressVariable::Name(x),
 	}
 }
 
@@ -26,7 +24,7 @@ pub fn convert_type_to_cps(base_ty: BaseType) -> CypressType {
 }
 
 pub fn convert_expression_to_cps(
-	base_term: BaseTerm<String>,
+	base_term: BaseTerm,
 	symbol_generator: &mut SymbolGenerator,
 ) -> Option<(CypressVariable, Box<dyn FnOnce(CypressTerm) -> CypressTerm>)> {
 	let ty = base_term.ty();
@@ -57,7 +55,7 @@ pub fn convert_expression_to_cps(
 		},
 		BaseTerm::Name(_, x) => {
 			// TODO: Does it matter that this is not necessarily fresh?
-			Some((CypressVariable::Name(x), Box::new(core::convert::identity)))
+			Some((convert_variable_to_cps(x), Box::new(core::convert::identity)))
 		},
 		BaseTerm::Tuple(parts) => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
@@ -106,7 +104,7 @@ pub fn convert_expression_to_cps(
 			body,
 		} => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
-			let parameter = CypressVariable::Name(parameter);
+			let parameter = convert_variable_to_cps(parameter);
 
 			let body = convert_tail_expression_to_cps(*body, None, symbol_generator)?;
 
@@ -117,7 +115,7 @@ pub fn convert_expression_to_cps(
 				binding.clone(),
 				Box::new(move |rest| CypressTerm::DeclareFunction {
 					binding: binding,
-					fixpoint_name: fixpoint_name.clone().map(|name| CypressVariable::Name(name)),
+					fixpoint_name: fixpoint_name.clone().map(|name| convert_variable_to_cps(name)),
 					domain: domain,
 					codomain: codomain,
 					parameter: parameter,
@@ -175,7 +173,7 @@ pub fn convert_expression_to_cps(
 				Box::new(move |body| CypressTerm::DeclareContinuation {
 					label: continuation,
 					domain,
-					parameter: CypressVariable::Name(assignee),
+					parameter: convert_variable_to_cps(assignee),
 					body: Box::new(rest_context(body)),
 					rest: Box::new(definition),
 				}),
@@ -257,7 +255,7 @@ pub fn convert_expression_to_cps(
 // Code will look very similar in many cases, except there is no translation context to be invoked; a continuation is called instead.
 // TODO: I wonder if there's a way to refactor this to reduce code duplication?
 pub fn convert_tail_expression_to_cps(
-	base_term: BaseTerm<String>,
+	base_term: BaseTerm,
 	continuation_label: Option<CypressLabel>,
 	symbol_generator: &mut SymbolGenerator,
 ) -> Option<CypressTerm> {
@@ -290,7 +288,7 @@ pub fn convert_tail_expression_to_cps(
 		},
 		BaseTerm::Name(_, argument) => Some(CypressTerm::Continue {
 			label: continuation_label,
-			argument: CypressVariable::Name(argument),
+			argument: convert_variable_to_cps(argument),
 		}),
 		BaseTerm::Tuple(parts) => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
@@ -336,11 +334,11 @@ pub fn convert_tail_expression_to_cps(
 			body,
 		} => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
-			let parameter = CypressVariable::Name(parameter);
+			let parameter = convert_variable_to_cps(parameter);
 
 			Some(CypressTerm::DeclareFunction {
 				binding: binding.clone(),
-				fixpoint_name: fixpoint_name.map(|name| CypressVariable::Name(name)),
+				fixpoint_name: fixpoint_name.map(|name| convert_variable_to_cps(name)),
 				domain: convert_type_to_cps(domain),
 				codomain: convert_type_to_cps(codomain),
 				parameter: parameter,
@@ -376,7 +374,7 @@ pub fn convert_tail_expression_to_cps(
 			Some(CypressTerm::DeclareContinuation {
 				label: inner_continuation_label,
 				domain: convert_type_to_cps(definition.ty()),
-				parameter: CypressVariable::Name(assignee),
+				parameter: convert_variable_to_cps(assignee),
 				body: Box::new(convert_tail_expression_to_cps(*rest, continuation_label, symbol_generator)?),
 				rest: Box::new(convert_tail_expression_to_cps(
 					*definition,
@@ -445,10 +443,8 @@ pub fn convert_tail_expression_to_cps(
 	}
 }
 
-pub fn convert_program_to_cps(base_term: BaseTerm<String>) -> Option<CypressTerm> {
-	let mut symbol_generator = SymbolGenerator(0);
-
-	let (expression_variable, expression_context) = convert_expression_to_cps(base_term, &mut symbol_generator)?;
+pub fn convert_program_to_cps(base_term: BaseTerm, symbol_generator: &mut SymbolGenerator) -> Option<CypressTerm> {
+	let (expression_variable, expression_context) = convert_expression_to_cps(base_term, symbol_generator)?;
 
 	Some(expression_context(CypressTerm::Halt {
 		argument: expression_variable,

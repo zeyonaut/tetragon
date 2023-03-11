@@ -1,11 +1,16 @@
 use std::sync::Arc;
 
-// TODO: Does this need to be generic? Well, I guess we'll see.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BaseTerm<V> {
+pub enum BaseVariable {
+	Auto(u64),
+	Name(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BaseTerm {
 	Polarity(bool),
 	Integer(i64),
-	Name(BaseType, V),
+	Name(BaseType, BaseVariable),
 	Tuple(Vec<(BaseType, Self)>),
 	Projection {
 		ty: BaseType,
@@ -15,8 +20,8 @@ pub enum BaseTerm<V> {
 	Function {
 		domain: BaseType,
 		codomain: BaseType,
-		fixpoint_name: Option<String>,
-		parameter: String,
+		fixpoint_name: Option<BaseVariable>,
+		parameter: BaseVariable,
 		body: Box<Self>,
 	},
 	Application {
@@ -26,7 +31,7 @@ pub enum BaseTerm<V> {
 	},
 	Assignment {
 		ty: BaseType,
-		assignee: String,
+		assignee: BaseVariable,
 		definition: Box<Self>,
 		rest: Box<Self>,
 	},
@@ -41,7 +46,7 @@ pub enum BaseTerm<V> {
 	},
 }
 
-impl<V> BaseTerm<V> {
+impl BaseTerm {
 	pub fn ty(&self) -> BaseType {
 		match self {
 			Self::Polarity(_) => BaseType::Polarity,
@@ -92,7 +97,7 @@ pub enum BaseType {
 
 #[derive(Clone)]
 pub struct RecursiveFunction {
-	fixpoint_name: String,
+	fixpoint_name: BaseVariable,
 	function: Arc<dyn (Fn(Self, BaseValue) -> Option<BaseValue>)>,
 }
 
@@ -119,15 +124,15 @@ impl core::fmt::Debug for BaseValue {
 
 #[derive(Clone)]
 pub struct BaseEnvironment {
-	pub values: Vec<(String, BaseValue)>,
+	pub values: Vec<(BaseVariable, BaseValue)>,
 }
 
 impl BaseEnvironment {
-	pub fn new(values: Vec<(String, BaseValue)>) -> Self {
+	pub fn new(values: Vec<(BaseVariable, BaseValue)>) -> Self {
 		Self { values }
 	}
 
-	pub fn lookup(&self, index_name: &str) -> Option<BaseValue> {
+	pub fn lookup(&self, index_name: &BaseVariable) -> Option<BaseValue> {
 		for (name, value) in &self.values {
 			if name == index_name {
 				return Some(value.clone());
@@ -136,18 +141,18 @@ impl BaseEnvironment {
 		None
 	}
 
-	pub fn extend(&self, name: &str, value: BaseValue) -> Self {
+	pub fn extend(&self, name: BaseVariable, value: BaseValue) -> Self {
 		Self {
 			values: {
 				let mut values = self.values.clone();
-				values.push((name.to_owned(), value.into()));
+				values.push((name, value.into()));
 				values
 			},
 		}
 	}
 }
 
-pub fn interpret_base(base_term: BaseTerm<String>, environment: BaseEnvironment) -> Option<BaseValue> {
+pub fn interpret_base(base_term: BaseTerm, environment: BaseEnvironment) -> Option<BaseValue> {
 	use BaseTerm::*;
 	match base_term {
 		Polarity(x) => Some(BaseValue::Polarity(x)),
@@ -181,14 +186,14 @@ pub fn interpret_base(base_term: BaseTerm<String>, environment: BaseEnvironment)
 						interpret_base(
 							(*body).clone(),
 							environment
-								.extend(&fixpoint.fixpoint_name.clone(), BaseValue::RecursiveFunction(fixpoint))
-								.extend(&parameter, value),
+								.extend(fixpoint.fixpoint_name.clone(), BaseValue::RecursiveFunction(fixpoint))
+								.extend(parameter.clone(), value),
 						)
 					}),
 				}))
 			} else {
 				Some(BaseValue::Function(Arc::new(move |value| {
-					interpret_base((*body).clone(), environment.extend(&parameter, value))
+					interpret_base((*body).clone(), environment.extend(parameter.clone(), value))
 				})))
 			}
 		},
@@ -212,7 +217,7 @@ pub fn interpret_base(base_term: BaseTerm<String>, environment: BaseEnvironment)
 			rest,
 		} => {
 			let definition = interpret_base(*definition, environment.clone())?;
-			interpret_base(*rest, environment.extend(&binding, definition))
+			interpret_base(*rest, environment.extend(binding, definition))
 		},
 		EqualityQuery { left, right } => {
 			let left = interpret_base(*left, environment.clone())?;

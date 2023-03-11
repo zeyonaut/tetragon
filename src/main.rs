@@ -36,12 +36,15 @@ use parser::{
 	lexer::Lexer,
 	parser::{Node, Parser},
 };
-use translator::elaborator::{elaborate, Context};
+use translator::{
+	elaborator::{elaborate_term, Context},
+	symbol::SymbolGenerator,
+};
 use utility::*;
 
 use crate::{
-	interpreter::base::{interpret_base, BaseEnvironment, BaseType, BaseValue},
-	translator::cps::convert_program_to_cps,
+	interpreter::base::{interpret_base, BaseEnvironment, BaseType, BaseValue, BaseVariable},
+	translator::{cps::convert_program_to_cps, elaborator::elaborate_program},
 };
 
 fn main() {
@@ -58,41 +61,20 @@ fn main() {
 	let expression = parser.parse(lexer).unwrap();
 
 	if let Node::Term(parsed_term) = expression {
-		let elaborated_expression = elaborate(
-			Context::new(vec![
-				(
-					"add".to_owned(),
-					BaseType::Power {
-						domain: Box::new(BaseType::Integer),
-						codomain: Box::new(BaseType::Power {
-							domain: Box::new(BaseType::Integer),
-							codomain: Box::new(BaseType::Integer),
-						}),
-					},
-				),
-				(
-					"add2".to_owned(),
-					BaseType::Power {
-						domain: Box::new(BaseType::Product(Vec::from([BaseType::Integer, BaseType::Integer]))),
-						codomain: Box::new(BaseType::Integer),
-					},
-				),
-			]),
-			parsed_term,
-			None,
-		)
-		.expect("Elaboration failed.");
+		let mut symbol_generator = SymbolGenerator::new();
 
-		// println!("Elaborated term: {:#?}", elaborated_expression);
+		let (elaborated_term, _) = elaborate_program(parsed_term, &mut symbol_generator).expect("Elaboration failed.");
+
+		// println!("Elaborated term: {:#?}", elaborated_term);
 
 		use std::time::Instant;
 
 		let now = Instant::now();
 
 		let interpreted_value = interpret_base(
-			elaborated_expression.clone(),
+			elaborated_term.clone(),
 			BaseEnvironment::new(vec![(
-				"add".to_owned(),
+				BaseVariable::Name("add".to_owned()),
 				BaseValue::Function(Arc::new(|value_0| match value_0 {
 					BaseValue::Integer(x) => Some(BaseValue::Function(Arc::new(move |value_1| match value_1 {
 						BaseValue::Integer(y) => Some(BaseValue::Integer(x + y)),
@@ -109,7 +91,8 @@ fn main() {
 
 		println!("Interpreted value: {:#?}", interpreted_value);
 
-		let cypress_term = convert_program_to_cps(elaborated_expression).expect("Failed to convert base term to CPS.");
+		let cypress_term =
+			convert_program_to_cps(elaborated_term, &mut symbol_generator).expect("Failed to convert base term to CPS.");
 
 		// println!("CPS-converted term: {:#?}", cypress_term);
 

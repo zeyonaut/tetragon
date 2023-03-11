@@ -1,20 +1,23 @@
+use std::collections::HashMap;
+
+use super::symbol::SymbolGenerator;
 use crate::{
-	interpreter::base::{BaseTerm, BaseType},
+	interpreter::base::{BaseTerm, BaseType, BaseVariable},
 	parser::parser::*,
 	utility::slice::match_slice,
 };
 
 #[derive(Clone)]
 pub struct Context {
-	tys: Vec<(String, BaseType)>,
+	tys: Vec<(BaseVariable, BaseType)>,
 }
 
 impl Context {
-	pub fn new(tys: Vec<(String, BaseType)>) -> Self {
+	pub fn new(tys: Vec<(BaseVariable, BaseType)>) -> Self {
 		Self { tys }
 	}
 
-	pub fn find(&self, name: &str) -> Option<BaseType> {
+	pub fn find(&self, name: &BaseVariable) -> Option<BaseType> {
 		for (test, ty) in self.tys.iter().rev() {
 			if test == name {
 				return Some(ty.clone());
@@ -23,7 +26,7 @@ impl Context {
 		None
 	}
 
-	pub fn extend(&self, name: String, ty: BaseType) -> Self {
+	pub fn extend(&self, name: BaseVariable, ty: BaseType) -> Self {
 		Self {
 			tys: {
 				let mut tys = self.tys.clone();
@@ -56,15 +59,31 @@ pub fn elaborate_ty(parsed_ty: ParsedType) -> Option<BaseType> {
 
 // TODO: This needs to get cleaned up as it's really messy (in particular: completely different styles in each branch, no error handling with Result).
 // TODO: Maybe make elaborated expressions a little less 'elaborate' by keeping types easily computable but not necessarily directly stored.
-pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<BaseType>) -> Option<BaseTerm<String>> {
+pub fn elaborate_term(
+	context: Context,
+	parsed_term: ParsedTerm,
+	expected_ty: Option<BaseType>,
+	names: &mut HashMap<u64, String>,
+	numbers: &mut HashMap<String, u64>,
+	symbol_generator: &mut SymbolGenerator,
+) -> Option<BaseTerm> {
 	match (expected_ty, parsed_term) {
 		(None, ParsedTerm::Polarity(pole)) => Some(BaseTerm::Polarity(pole)),
 		(None, ParsedTerm::Integer(x)) => Some(BaseTerm::Integer(x)),
-		(None, ParsedTerm::Name(name)) => context.find(&name).map(|ty| BaseTerm::Name(ty, name)),
+		(None, ParsedTerm::Name(name)) => {
+			let variable = numbers
+				.get(&name)
+				.copied()
+				.map_or(BaseVariable::Name(name), |number| BaseVariable::Auto(number));
+
+			let ty = context.find(&variable)?;
+
+			Some(BaseTerm::Name(ty, variable))
+		},
 		(None, ParsedTerm::Tuple(tuple)) => {
 			let typed_terms = tuple
 				.into_iter()
-				.map(move |parsed_term| elaborate(context.clone(), parsed_term, None))
+				.map(move |parsed_term| elaborate_term(context.clone(), parsed_term, None, names, numbers, symbol_generator))
 				.collect::<Option<Vec<_>>>()
 				.map(|v| {
 					v.into_iter()
@@ -75,7 +94,7 @@ pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<
 			Some(BaseTerm::Tuple(typed_terms))
 		},
 		(None, ParsedTerm::Projection { tuple, index }) => {
-			let tuple = elaborate(context, *tuple, None)?;
+			let tuple = elaborate_term(context, *tuple, None, names, numbers, symbol_generator)?;
 			match tuple.ty() {
 				BaseType::Product(product) => Some(BaseTerm::Projection {
 					ty: product.get(index).cloned()?,
@@ -93,22 +112,36 @@ pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<
 				codomain,
 				body,
 			},
-		) => elaborate_ty(domain)
-			.zip(elaborate_ty(codomain))
-			.and_then(|(domain, codomain)| {
-				elaborate(
-					context.extend(parameter.clone(), domain.clone()),
-					*body,
-					Some(codomain.clone()),
-				)
-				.map(|body| BaseTerm::Function {
-					fixpoint_name: None,
-					parameter,
-					domain,
-					codomain,
-					body: Box::new(body),
-				})
-			}),
+		) => {
+			let domain = elaborate_ty(domain)?;
+			let codomain = elaborate_ty(codomain)?;
+
+			let shadowed_parameter_number = numbers.get(&parameter).copied();
+			let bound_parameter_number = symbol_generator.fresh();
+			names.insert(bound_parameter_number, parameter.clone());
+			numbers.insert(parameter.clone(), bound_parameter_number);
+
+			let body = elaborate_term(
+				context.extend(BaseVariable::Auto(bound_parameter_number), domain.clone()),
+				*body,
+				Some(codomain.clone()),
+				names,
+				numbers,
+				symbol_generator,
+			)?;
+
+			if let Some(shadowed_parameter_number) = shadowed_parameter_number {
+				numbers.insert(parameter, shadowed_parameter_number);
+			}
+
+			Some(BaseTerm::Function {
+				fixpoint_name: None,
+				parameter: BaseVariable::Auto(bound_parameter_number),
+				domain,
+				codomain,
+				body: Box::new(body),
+			})
+		},
 		(
 			None,
 			ParsedTerm::Fixpoint {
@@ -123,38 +156,59 @@ pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<
 				body: lambda_body,
 			} = *mu_body.clone()
 			{
-				elaborate_ty(domain)
-					.zip(elaborate_ty(codomain))
-					.and_then(|(domain, codomain)| {
-						elaborate(
-							context
-								.extend(
-									mu_binding.clone(),
-									BaseType::Power {
-										domain: Box::new(domain.clone()),
-										codomain: Box::new(codomain.clone()),
-									},
-								)
-								.extend(parameter.clone(), domain.clone()),
-							(*lambda_body).clone(),
-							Some(codomain.clone()),
+				let domain = elaborate_ty(domain)?;
+				let codomain = elaborate_ty(codomain)?;
+
+				let shadowed_fixpoint_number = numbers.get(&parameter).copied();
+				let bound_fixpoint_number = symbol_generator.fresh();
+				names.insert(bound_fixpoint_number, mu_binding.clone());
+				numbers.insert(mu_binding.clone(), bound_fixpoint_number);
+
+				let shadowed_parameter_number = numbers.get(&parameter).copied();
+				let bound_parameter_number = symbol_generator.fresh();
+				names.insert(bound_parameter_number, parameter.clone());
+				numbers.insert(parameter.clone(), bound_parameter_number);
+
+				let body = elaborate_term(
+					context
+						.extend(
+							BaseVariable::Auto(bound_fixpoint_number),
+							BaseType::Power {
+								domain: Box::new(domain.clone()),
+								codomain: Box::new(codomain.clone()),
+							},
 						)
-						.map(|body| BaseTerm::Function {
-							fixpoint_name: Some(mu_binding),
-							parameter,
-							domain,
-							codomain,
-							body: Box::new(body),
-						})
-					})
+						.extend(BaseVariable::Auto(bound_parameter_number), domain.clone()),
+					(*lambda_body).clone(),
+					Some(codomain.clone()),
+					names,
+					numbers,
+					symbol_generator,
+				)?;
+
+				if let Some(shadowed_parameter_number) = shadowed_parameter_number {
+					numbers.insert(parameter, shadowed_parameter_number);
+				}
+
+				if let Some(shadowed_fixpoint_number) = shadowed_fixpoint_number {
+					numbers.insert(mu_binding, shadowed_fixpoint_number);
+				}
+
+				Some(BaseTerm::Function {
+					fixpoint_name: Some(BaseVariable::Auto(bound_fixpoint_number)),
+					parameter: BaseVariable::Auto(bound_parameter_number),
+					domain,
+					codomain,
+					body: Box::new(body),
+				})
 			} else {
 				None
 			}
 		},
 		(None, ParsedTerm::Application { function, argument }) => {
-			let function = elaborate(context.clone(), *function, None)?;
+			let function = elaborate_term(context.clone(), *function, None, names, numbers, symbol_generator)?;
 			if let BaseType::Power { domain, codomain } = function.ty() {
-				let argument = elaborate(context, *argument, Some(*domain))?;
+				let argument = elaborate_term(context, *argument, Some(*domain), names, numbers, symbol_generator)?;
 				Some(BaseTerm::Application {
 					ty: *codomain,
 					function: Box::new(function),
@@ -172,31 +226,49 @@ pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<
 				rest,
 			},
 		) => {
-			let definition = elaborate(context.clone(), *definition, None)?;
-			let rest = elaborate(context.extend(binding.clone(), definition.ty()), *rest, None)?;
+			let definition = elaborate_term(context.clone(), *definition, None, names, numbers, symbol_generator)?;
+
+			let shadowed_assignee_number = numbers.get(&binding).copied();
+			let bound_assignee_number = symbol_generator.fresh();
+			names.insert(bound_assignee_number, binding.clone());
+			numbers.insert(binding.clone(), bound_assignee_number);
+
+			let rest = elaborate_term(
+				context.extend(BaseVariable::Auto(bound_assignee_number), definition.ty()),
+				*rest,
+				None,
+				names,
+				numbers,
+				symbol_generator,
+			)?;
+
+			if let Some(shadowed_assignee_number) = shadowed_assignee_number {
+				numbers.insert(binding, shadowed_assignee_number);
+			}
+
 			Some(BaseTerm::Assignment {
 				ty: rest.ty(),
-				assignee: binding,
+				assignee: BaseVariable::Auto(bound_assignee_number),
 				definition: Box::new(definition),
 				rest: Box::new(rest),
 			})
 		},
 		(None, ParsedTerm::EqualityQuery { left, right }) => {
-			let left = elaborate(context.clone(), *left, None)?;
-			let right = elaborate(context, *right, Some(left.ty()))?;
+			let left = elaborate_term(context.clone(), *left, None, names, numbers, symbol_generator)?;
+			let right = elaborate_term(context, *right, Some(left.ty()), names, numbers, symbol_generator)?;
 			Some(BaseTerm::EqualityQuery {
 				left: Box::new(left),
 				right: Box::new(right),
 			})
 		},
 		(None, ParsedTerm::CaseSplit { scrutinee, cases }) => {
-			let scrutinee = elaborate(context.clone(), *scrutinee, None)?;
+			let scrutinee = elaborate_term(context.clone(), *scrutinee, None, names, numbers, symbol_generator)?;
 			match_slice! {cases.cases.into_boxed_slice();
 				[(case_0, body_0), (case_1, body_1)] => {
 					// Ensure that the case split is exhaustive.
 					if case_0 ^ case_1 {
-						let body_0 = elaborate(context.clone(), *body_0, None)?;
-						let body_1 = elaborate(context, *body_1, Some(body_0.ty()))?;
+						let body_0 = elaborate_term(context.clone(), *body_0, None, names, numbers, symbol_generator)?;
+						let body_1 = elaborate_term(context, *body_1, Some(body_0.ty()), names, numbers, symbol_generator)?;
 						Some(BaseTerm::CaseSplit {
 							ty: body_0.ty(),
 							scrutinee: Box::new(scrutinee),
@@ -209,8 +281,44 @@ pub fn elaborate(context: Context, parsed_term: ParsedTerm, expected_ty: Option<
 				_ => None,
 			}
 		},
-		(Some(expected_ty), parsed_term) => {
-			elaborate(context, parsed_term, None).filter(|typed_term| typed_term.ty() == expected_ty)
-		},
+		(Some(expected_ty), parsed_term) => elaborate_term(context, parsed_term, None, names, numbers, symbol_generator)
+			.filter(|typed_term| typed_term.ty() == expected_ty),
 	}
+}
+
+pub fn elaborate_program(
+	parsed_term: ParsedTerm,
+	symbol_generator: &mut SymbolGenerator,
+) -> Option<(BaseTerm, HashMap<u64, String>)> {
+	let mut names = HashMap::new();
+	let mut numbers = HashMap::new();
+
+	let term = elaborate_term(
+		Context::new(vec![
+			(
+				BaseVariable::Name("add".to_owned()),
+				BaseType::Power {
+					domain: Box::new(BaseType::Integer),
+					codomain: Box::new(BaseType::Power {
+						domain: Box::new(BaseType::Integer),
+						codomain: Box::new(BaseType::Integer),
+					}),
+				},
+			),
+			(
+				BaseVariable::Name("add2".to_owned()),
+				BaseType::Power {
+					domain: Box::new(BaseType::Product(Vec::from([BaseType::Integer, BaseType::Integer]))),
+					codomain: Box::new(BaseType::Integer),
+				},
+			),
+		]),
+		parsed_term,
+		None,
+		&mut names,
+		&mut numbers,
+		symbol_generator,
+	)?;
+
+	Some((term, names))
 }

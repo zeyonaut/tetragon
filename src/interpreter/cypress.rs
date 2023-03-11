@@ -142,7 +142,7 @@ impl CypressTerm {
 		insert_intrinsics(&mut variables);
 
 		loop {
-			//println!("Return stack: {}", returners.len());
+			// println!("Evaluating: {:#?}", term);
 			match term.clone() {
 				CypressTerm::AssignValue {
 					binding,
