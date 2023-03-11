@@ -1,5 +1,7 @@
-use super::elaborator::*;
-use crate::{interpreter::cypress::*, utility::composite::apply_composed};
+use crate::{
+	interpreter::{base::*, cypress::*},
+	utility::composite::apply_composed,
+};
 
 pub struct SymbolGenerator(u64);
 
@@ -24,11 +26,11 @@ pub fn convert_type_to_cps(base_ty: BaseType) -> CypressType {
 }
 
 pub fn convert_expression_to_cps(
-	base_expression: BaseExpression,
+	base_term: BaseTerm<String>,
 	symbol_generator: &mut SymbolGenerator,
 ) -> Option<(CypressVariable, Box<dyn FnOnce(CypressTerm) -> CypressTerm>)> {
-	let ty = base_expression.ty;
-	match base_expression.term {
+	let ty = base_term.ty();
+	match base_term {
 		BaseTerm::Polarity(x) => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
 			Some((
@@ -53,7 +55,7 @@ pub fn convert_expression_to_cps(
 				}),
 			))
 		},
-		BaseTerm::Name(x) => {
+		BaseTerm::Name(_, x) => {
 			// TODO: Does it matter that this is not necessarily fresh?
 			Some((CypressVariable::Name(x), Box::new(core::convert::identity)))
 		},
@@ -62,7 +64,7 @@ pub fn convert_expression_to_cps(
 
 			let (part_variables, part_contexts): (Vec<_>, Vec<_>) = parts
 				.into_iter()
-				.map(|expression| convert_expression_to_cps(expression, symbol_generator))
+				.map(|(_, term)| convert_expression_to_cps(term, symbol_generator))
 				.collect::<Option<Vec<_>>>()?
 				.into_iter()
 				.unzip();
@@ -80,7 +82,7 @@ pub fn convert_expression_to_cps(
 				}),
 			))
 		},
-		BaseTerm::Projection { tuple, index } => {
+		BaseTerm::Projection { ty: _, tuple, index } => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
 
 			let (tuple_variable, tuple_context) = convert_expression_to_cps(*tuple, symbol_generator)?;
@@ -105,7 +107,7 @@ pub fn convert_expression_to_cps(
 		} => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
 			let parameter = CypressVariable::Name(parameter);
-			
+
 			let body = convert_tail_expression_to_cps(*body, None, symbol_generator)?;
 
 			let domain = convert_type_to_cps(domain.clone());
@@ -124,7 +126,11 @@ pub fn convert_expression_to_cps(
 				}),
 			))
 		},
-		BaseTerm::Application { function, argument } => {
+		BaseTerm::Application {
+			ty: _,
+			function,
+			argument,
+		} => {
 			// TODO: Handle intrinsic functions as operations instead. Maybe? Or how long can I delay the introduction of intrinsics?
 			let outcome = CypressVariable::Auto(symbol_generator.fresh());
 			let continuation = symbol_generator.fresh();
@@ -152,13 +158,14 @@ pub fn convert_expression_to_cps(
 			))
 		},
 		BaseTerm::Assignment {
+			ty: _,
 			assignee,
 			definition,
 			rest,
 		} => {
 			let continuation = symbol_generator.fresh();
 
-			let domain = convert_type_to_cps(definition.ty.clone());
+			let domain = convert_type_to_cps(definition.ty());
 
 			let definition = convert_tail_expression_to_cps(*definition, Some(continuation), symbol_generator)?;
 			let (rest_variable, rest_context) = convert_expression_to_cps(*rest, symbol_generator)?;
@@ -190,7 +197,7 @@ pub fn convert_expression_to_cps(
 				}),
 			))
 		},
-		BaseTerm::CaseSplit { scrutinee, cases } => {
+		BaseTerm::CaseSplit { ty: _, scrutinee, cases } => {
 			let outcome_continuation = symbol_generator.fresh();
 			let outcome_parameter = CypressVariable::Auto(symbol_generator.fresh());
 			let yes_continuation = symbol_generator.fresh();
@@ -250,12 +257,11 @@ pub fn convert_expression_to_cps(
 // Code will look very similar in many cases, except there is no translation context to be invoked; a continuation is called instead.
 // TODO: I wonder if there's a way to refactor this to reduce code duplication?
 pub fn convert_tail_expression_to_cps(
-	base_expression: BaseExpression,
+	base_term: BaseTerm<String>,
 	continuation_label: Option<CypressLabel>,
 	symbol_generator: &mut SymbolGenerator,
 ) -> Option<CypressTerm> {
-	let ty = base_expression.ty;
-	match base_expression.term {
+	match base_term {
 		BaseTerm::Polarity(x) => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
 
@@ -282,7 +288,7 @@ pub fn convert_tail_expression_to_cps(
 				}),
 			})
 		},
-		BaseTerm::Name(argument) => Some(CypressTerm::Continue {
+		BaseTerm::Name(_, argument) => Some(CypressTerm::Continue {
 			label: continuation_label,
 			argument: CypressVariable::Name(argument),
 		}),
@@ -291,7 +297,7 @@ pub fn convert_tail_expression_to_cps(
 
 			let (part_variables, part_contexts): (Vec<_>, Vec<_>) = parts
 				.into_iter()
-				.map(|expression| convert_expression_to_cps(expression, symbol_generator))
+				.map(|(_, term)| convert_expression_to_cps(term, symbol_generator))
 				.collect::<Option<Vec<_>>>()?
 				.into_iter()
 				.unzip();
@@ -308,7 +314,7 @@ pub fn convert_tail_expression_to_cps(
 				},
 			))
 		},
-		BaseTerm::Projection { tuple, index } => {
+		BaseTerm::Projection { ty: _, tuple, index } => {
 			let binding = CypressVariable::Auto(symbol_generator.fresh());
 
 			let (tuple_variable, tuple_context) = convert_expression_to_cps(*tuple, symbol_generator)?;
@@ -345,7 +351,11 @@ pub fn convert_tail_expression_to_cps(
 				}),
 			})
 		},
-		BaseTerm::Application { function, argument } => {
+		BaseTerm::Application {
+			ty: _,
+			function,
+			argument,
+		} => {
 			let (function_variable, function_context) = convert_expression_to_cps(*function, symbol_generator)?;
 			let (argument_variable, argument_context) = convert_expression_to_cps(*argument, symbol_generator)?;
 
@@ -356,6 +366,7 @@ pub fn convert_tail_expression_to_cps(
 			})))
 		},
 		BaseTerm::Assignment {
+			ty: _,
 			assignee,
 			definition,
 			rest,
@@ -364,7 +375,7 @@ pub fn convert_tail_expression_to_cps(
 
 			Some(CypressTerm::DeclareContinuation {
 				label: inner_continuation_label,
-				domain: convert_type_to_cps(definition.ty.clone()),
+				domain: convert_type_to_cps(definition.ty()),
 				parameter: CypressVariable::Name(assignee),
 				body: Box::new(convert_tail_expression_to_cps(*rest, continuation_label, symbol_generator)?),
 				rest: Box::new(convert_tail_expression_to_cps(
@@ -389,8 +400,7 @@ pub fn convert_tail_expression_to_cps(
 				}),
 			})))
 		},
-		BaseTerm::CaseSplit { scrutinee, cases } =>
-		{
+		BaseTerm::CaseSplit { ty: _, scrutinee, cases } => {
 			let yes_continuation = symbol_generator.fresh();
 			let yes_parameter = CypressVariable::Auto(symbol_generator.fresh());
 			let no_continuation = symbol_generator.fresh();
@@ -414,7 +424,11 @@ pub fn convert_tail_expression_to_cps(
 				label: yes_continuation,
 				domain: CypressType::Unity,
 				parameter: yes_parameter.clone(),
-				body: Box::new(convert_tail_expression_to_cps(yes_term, continuation_label, symbol_generator)?),
+				body: Box::new(convert_tail_expression_to_cps(
+					yes_term,
+					continuation_label,
+					symbol_generator,
+				)?),
 				rest: Box::new(CypressTerm::DeclareContinuation {
 					label: no_continuation,
 					domain: CypressType::Unity,
@@ -427,14 +441,14 @@ pub fn convert_tail_expression_to_cps(
 					})),
 				}),
 			})
-		}
+		},
 	}
 }
 
-pub fn convert_program_to_cps(base_expression: BaseExpression) -> Option<CypressTerm> {
+pub fn convert_program_to_cps(base_term: BaseTerm<String>) -> Option<CypressTerm> {
 	let mut symbol_generator = SymbolGenerator(0);
 
-	let (expression_variable, expression_context) = convert_expression_to_cps(base_expression, &mut symbol_generator)?;
+	let (expression_variable, expression_context) = convert_expression_to_cps(base_term, &mut symbol_generator)?;
 
 	Some(expression_context(CypressTerm::Halt {
 		argument: expression_variable,

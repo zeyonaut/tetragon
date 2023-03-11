@@ -1,6 +1,94 @@
 use std::sync::Arc;
 
-use crate::translator::elaborator::{BaseExpression, BaseTerm};
+// TODO: Does this need to be generic? Well, I guess we'll see.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BaseTerm<V> {
+	Polarity(bool),
+	Integer(i64),
+	Name(BaseType, V),
+	Tuple(Vec<(BaseType, Self)>),
+	Projection {
+		ty: BaseType,
+		tuple: Box<Self>,
+		index: usize,
+	},
+	Function {
+		domain: BaseType,
+		codomain: BaseType,
+		fixpoint_name: Option<String>,
+		parameter: String,
+		body: Box<Self>,
+	},
+	Application {
+		ty: BaseType,
+		function: Box<Self>,
+		argument: Box<Self>,
+	},
+	Assignment {
+		ty: BaseType,
+		assignee: String,
+		definition: Box<Self>,
+		rest: Box<Self>,
+	},
+	EqualityQuery {
+		left: Box<Self>,
+		right: Box<Self>,
+	},
+	CaseSplit {
+		ty: BaseType,
+		scrutinee: Box<Self>,
+		cases: Vec<(bool, Box<Self>)>,
+	},
+}
+
+impl<V> BaseTerm<V> {
+	pub fn ty(&self) -> BaseType {
+		match self {
+			Self::Polarity(_) => BaseType::Polarity,
+			Self::Integer(_) => BaseType::Integer,
+			Self::Name(ty, _) => ty.clone(),
+			Self::Tuple(typed_terms) => BaseType::Product(typed_terms.iter().map(|(ty, _)| ty).cloned().collect()),
+			Self::Projection { ty, tuple: _, index: _ } => ty.clone(),
+			Self::Function {
+				domain,
+				codomain,
+				fixpoint_name: _,
+				parameter: _,
+				body: _,
+			} => BaseType::Power {
+				domain: Box::new(domain.clone()),
+				codomain: Box::new(codomain.clone()),
+			},
+			Self::Application {
+				ty,
+				function: _,
+				argument: _,
+			} => ty.clone(),
+			Self::Assignment {
+				ty,
+				assignee: _,
+				definition: _,
+				rest: _,
+			} => ty.clone(),
+			Self::EqualityQuery { left: _, right: _ } => BaseType::Polarity,
+			Self::CaseSplit {
+				ty,
+				scrutinee: _,
+				cases: _,
+			} => ty.clone(),
+		}
+	}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BaseType {
+	//	Zero,
+	//	One,
+	Polarity,
+	Integer,
+	Product(Vec<Self>),
+	Power { domain: Box<Self>, codomain: Box<Self> },
+}
 
 #[derive(Clone)]
 pub struct RecursiveFunction {
@@ -59,19 +147,19 @@ impl BaseEnvironment {
 	}
 }
 
-pub fn interpret_base(base_term: BaseExpression, environment: BaseEnvironment) -> Option<BaseValue> {
+pub fn interpret_base(base_term: BaseTerm<String>, environment: BaseEnvironment) -> Option<BaseValue> {
 	use BaseTerm::*;
-	match base_term.term {
+	match base_term {
 		Polarity(x) => Some(BaseValue::Polarity(x)),
 		Integer(x) => Some(BaseValue::Integer(x)),
-		Name(name) => environment.lookup(&name),
+		Name(_, name) => environment.lookup(&name),
 		Tuple(tuple) => Some(BaseValue::Tuple(
 			tuple
 				.into_iter()
-				.map(|expression| interpret_base(expression, environment.clone()))
+				.map(|(_, term)| interpret_base(term, environment.clone()))
 				.collect::<Option<_>>()?,
 		)),
-		Projection { tuple, index } => {
+		Projection { ty: _, tuple, index } => {
 			let tuple = interpret_base(*tuple, environment)?;
 			if let BaseValue::Tuple(tuple) = tuple {
 				tuple.get(index).cloned()
@@ -104,7 +192,11 @@ pub fn interpret_base(base_term: BaseExpression, environment: BaseEnvironment) -
 				})))
 			}
 		},
-		Application { function, argument } => {
+		Application {
+			ty: _,
+			function,
+			argument,
+		} => {
 			let function = interpret_base(*function, environment.clone())?;
 			let argument = interpret_base(*argument, environment)?;
 			match function {
@@ -114,6 +206,7 @@ pub fn interpret_base(base_term: BaseExpression, environment: BaseEnvironment) -
 			}
 		},
 		Assignment {
+			ty: _,
 			assignee: binding,
 			definition,
 			rest,
@@ -130,7 +223,7 @@ pub fn interpret_base(base_term: BaseExpression, environment: BaseEnvironment) -
 				_ => None,
 			}
 		},
-		CaseSplit { scrutinee, cases } => {
+		CaseSplit { ty: _, scrutinee, cases } => {
 			let scrutinee = interpret_base(*scrutinee, environment.clone())?;
 			let scrutinee = match scrutinee {
 				BaseValue::Polarity(x) => Some(x),

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env::var, hash::Hash, ops::Index, sync::Arc};
+use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 use crate::utility::slice::Slice;
 
