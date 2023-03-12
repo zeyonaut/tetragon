@@ -1,3 +1,4 @@
+#[derive(Clone)]
 pub struct SymbolGenerator(u64);
 
 impl SymbolGenerator {

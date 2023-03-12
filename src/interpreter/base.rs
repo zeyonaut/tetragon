@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+pub type BaseBindingLabel = u64;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BaseVariable {
-	Auto(u64),
+	Auto(BaseBindingLabel),
 	Name(String),
 }
 
@@ -20,8 +22,8 @@ pub enum BaseTerm {
 	Function {
 		domain: BaseType,
 		codomain: BaseType,
-		fixpoint_name: Option<BaseVariable>,
-		parameter: BaseVariable,
+		fixpoint_name: Option<BaseBindingLabel>,
+		parameter: BaseBindingLabel,
 		body: Box<Self>,
 	},
 	Application {
@@ -31,7 +33,7 @@ pub enum BaseTerm {
 	},
 	Assignment {
 		ty: BaseType,
-		assignee: BaseVariable,
+		assignee: BaseBindingLabel,
 		definition: Box<Self>,
 		rest: Box<Self>,
 	},
@@ -97,7 +99,7 @@ pub enum BaseType {
 
 #[derive(Clone)]
 pub struct RecursiveFunction {
-	fixpoint_name: BaseVariable,
+	fixpoint_name: BaseBindingLabel,
 	function: Arc<dyn (Fn(Self, BaseValue) -> Option<BaseValue>)>,
 }
 
@@ -181,19 +183,19 @@ pub fn interpret_base(base_term: BaseTerm, environment: BaseEnvironment) -> Opti
 		} => {
 			if let Some(fixpoint_name) = fixpoint_name {
 				Some(BaseValue::RecursiveFunction(RecursiveFunction {
-					fixpoint_name: fixpoint_name.clone(),
+					fixpoint_name,
 					function: Arc::new(move |fixpoint, value| {
 						interpret_base(
 							(*body).clone(),
 							environment
-								.extend(fixpoint.fixpoint_name.clone(), BaseValue::RecursiveFunction(fixpoint))
-								.extend(parameter.clone(), value),
+								.extend(BaseVariable::Auto(fixpoint.fixpoint_name), BaseValue::RecursiveFunction(fixpoint))
+								.extend(BaseVariable::Auto(parameter), value),
 						)
 					}),
 				}))
 			} else {
 				Some(BaseValue::Function(Arc::new(move |value| {
-					interpret_base((*body).clone(), environment.extend(parameter.clone(), value))
+					interpret_base((*body).clone(), environment.extend(BaseVariable::Auto(parameter), value))
 				})))
 			}
 		},
@@ -217,7 +219,7 @@ pub fn interpret_base(base_term: BaseTerm, environment: BaseEnvironment) -> Opti
 			rest,
 		} => {
 			let definition = interpret_base(*definition, environment.clone())?;
-			interpret_base(*rest, environment.extend(binding, definition))
+			interpret_base(*rest, environment.extend(BaseVariable::Auto(binding), definition))
 		},
 		EqualityQuery { left, right } => {
 			let left = interpret_base(*left, environment.clone())?;

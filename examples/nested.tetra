@@ -1,0 +1,13 @@
+a :: {x Int} -> Int [
+	q :: [add x 1]
+	b :: {y Int} -> Int [
+		r :: [add y 3]
+		c :: {z Int} -> Int [
+			s :: [add z 5]
+			add [add q r] s
+		]
+		c 4
+	]
+	b 2
+]
+a 0

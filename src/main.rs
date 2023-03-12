@@ -37,14 +37,13 @@ use parser::{
 	parser::{Node, Parser},
 };
 use translator::{
-	elaborator::{elaborate_term, Context},
 	symbol::SymbolGenerator,
 };
 use utility::*;
 
 use crate::{
-	interpreter::base::{interpret_base, BaseEnvironment, BaseType, BaseValue, BaseVariable},
-	translator::{cps::convert_program_to_cps, elaborator::elaborate_program},
+	interpreter::base::{interpret_base, BaseEnvironment, BaseValue, BaseVariable},
+	translator::{cps::convert_program_to_cps, elaborator::elaborate_program, hoister::hoist_program},
 };
 
 fn main() {
@@ -98,13 +97,17 @@ fn main() {
 
 		let now = Instant::now();
 
-		let cypress_value = cypress_term.evaluate().expect("Failed to evaluate CPS term.");
+		let cypress_value = cypress_term.clone().evaluate(symbol_generator.clone()).expect("Failed to evaluate CPS term.");
 
 		let elapsed = now.elapsed();
 
 		println!("Elapsed (CPS): {:.2?}", elapsed);
 
 		println!("CPS-converted value: {:#?}", cypress_value);
+
+		let hoisted_program = hoist_program(cypress_term, &mut symbol_generator);
+
+		println!("Hoisted program: {:#?}", hoisted_program);
 	} else {
 		panic!("Not a term");
 	}

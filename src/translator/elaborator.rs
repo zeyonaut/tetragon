@@ -136,7 +136,7 @@ pub fn elaborate_term(
 
 			Some(BaseTerm::Function {
 				fixpoint_name: None,
-				parameter: BaseVariable::Auto(bound_parameter_number),
+				parameter: bound_parameter_number,
 				domain,
 				codomain,
 				body: Box::new(body),
@@ -195,8 +195,8 @@ pub fn elaborate_term(
 				}
 
 				Some(BaseTerm::Function {
-					fixpoint_name: Some(BaseVariable::Auto(bound_fixpoint_number)),
-					parameter: BaseVariable::Auto(bound_parameter_number),
+					fixpoint_name: Some(bound_fixpoint_number),
+					parameter: bound_parameter_number,
 					domain,
 					codomain,
 					body: Box::new(body),
@@ -248,7 +248,7 @@ pub fn elaborate_term(
 
 			Some(BaseTerm::Assignment {
 				ty: rest.ty(),
-				assignee: BaseVariable::Auto(bound_assignee_number),
+				assignee: bound_assignee_number,
 				definition: Box::new(definition),
 				rest: Box::new(rest),
 			})

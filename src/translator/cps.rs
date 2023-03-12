@@ -6,7 +6,7 @@ use crate::{
 
 pub fn convert_variable_to_cps(variable: BaseVariable) -> CypressVariable {
 	match variable {
-		BaseVariable::Auto(x) => CypressVariable::Auto(x),
+		BaseVariable::Auto(x) => CypressVariable::Local(x),
 		BaseVariable::Name(x) => CypressVariable::Name(x),
 	}
 }
@@ -30,35 +30,34 @@ pub fn convert_expression_to_cps(
 	let ty = base_term.ty();
 	match base_term {
 		BaseTerm::Polarity(x) => {
-			let binding = CypressVariable::Auto(symbol_generator.fresh());
+			let binding = symbol_generator.fresh();
 			Some((
-				binding.clone(),
+				CypressVariable::Local(binding),
 				Box::new(move |rest| CypressTerm::AssignValue {
 					binding,
 					ty: CypressType::Polarity,
-					value: CypressValue::Polarity(x),
+					value: CypressPrimitive::Polarity(x),
 					rest: Box::new(rest),
 				}),
 			))
 		},
 		BaseTerm::Integer(x) => {
-			let binding = CypressVariable::Auto(symbol_generator.fresh());
+			let binding = symbol_generator.fresh();
 			Some((
-				binding.clone(),
+				CypressVariable::Local(binding),
 				Box::new(move |rest| CypressTerm::AssignValue {
 					binding,
 					ty: CypressType::Integer,
-					value: CypressValue::Integer(x),
+					value: CypressPrimitive::Integer(x),
 					rest: Box::new(rest),
 				}),
 			))
 		},
 		BaseTerm::Name(_, x) => {
-			// TODO: Does it matter that this is not necessarily fresh?
 			Some((convert_variable_to_cps(x), Box::new(core::convert::identity)))
 		},
 		BaseTerm::Tuple(parts) => {
-			let binding = CypressVariable::Auto(symbol_generator.fresh());
+			let binding = symbol_generator.fresh();
 
 			let (part_variables, part_contexts): (Vec<_>, Vec<_>) = parts
 				.into_iter()
@@ -67,7 +66,7 @@ pub fn convert_expression_to_cps(
 				.into_iter()
 				.unzip();
 			Some((
-				binding.clone(),
+				CypressVariable::Local(binding),
 				Box::new(move |body| {
 					apply_composed(
 						part_contexts.into_iter().rev(),
@@ -81,12 +80,12 @@ pub fn convert_expression_to_cps(
 			))
 		},
 		BaseTerm::Projection { ty: _, tuple, index } => {
-			let binding = CypressVariable::Auto(symbol_generator.fresh());
+			let binding = symbol_generator.fresh();
 
 			let (tuple_variable, tuple_context) = convert_expression_to_cps(*tuple, symbol_generator)?;
 
 			Some((
-				binding.clone(),
+				CypressVariable::Local(binding),
 				Box::new(move |body| {
 					tuple_context(CypressTerm::AssignOperation {
 						binding,
@@ -103,8 +102,7 @@ pub fn convert_expression_to_cps(
 			codomain,
 			body,
 		} => {
-			let binding = CypressVariable::Auto(symbol_generator.fresh());
-			let parameter = convert_variable_to_cps(parameter);
+			let binding = symbol_generator.fresh();
 
 			let body = convert_tail_expression_to_cps(*body, None, symbol_generator)?;
 
@@ -112,13 +110,13 @@ pub fn convert_expression_to_cps(
 			let codomain = convert_type_to_cps(codomain.clone());
 
 			Some((
-				binding.clone(),
+				CypressVariable::Local(binding),
 				Box::new(move |rest| CypressTerm::DeclareFunction {
-					binding: binding,
-					fixpoint_name: fixpoint_name.clone().map(|name| convert_variable_to_cps(name)),
-					domain: domain,
-					codomain: codomain,
-					parameter: parameter,
+					binding,
+					fixpoint_name,
+					domain,
+					codomain,
+					parameter,
 					body: Box::new(body),
 					rest: Box::new(rest),
 				}),
@@ -130,7 +128,7 @@ pub fn convert_expression_to_cps(
 			argument,
 		} => {
 			// TODO: Handle intrinsic functions as operations instead. Maybe? Or how long can I delay the introduction of intrinsics?
-			let outcome = CypressVariable::Auto(symbol_generator.fresh());
+			let outcome = symbol_generator.fresh();
 			let continuation = symbol_generator.fresh();
 
 			let (function_variable, function_context) = convert_expression_to_cps(*function, symbol_generator)?;
@@ -139,7 +137,7 @@ pub fn convert_expression_to_cps(
 			let outcome_ty = convert_type_to_cps(ty);
 
 			Some((
-				outcome.clone(),
+				CypressVariable::Local(outcome),
 				Box::new(move |body| {
 					function_context(argument_context(CypressTerm::DeclareContinuation {
 						label: continuation,
@@ -173,22 +171,22 @@ pub fn convert_expression_to_cps(
 				Box::new(move |body| CypressTerm::DeclareContinuation {
 					label: continuation,
 					domain,
-					parameter: convert_variable_to_cps(assignee),
+					parameter: assignee,
 					body: Box::new(rest_context(body)),
 					rest: Box::new(definition),
 				}),
 			))
 		},
 		BaseTerm::EqualityQuery { left, right } => {
-			let binding = CypressVariable::Auto(symbol_generator.fresh());
+			let binding = symbol_generator.fresh();
 			let (left_variable, left_context) = convert_expression_to_cps(*left, symbol_generator)?;
 			let (right_variable, right_context) = convert_expression_to_cps(*right, symbol_generator)?;
 
 			Some((
-				binding.clone(),
+				CypressVariable::Local(binding),
 				Box::new(move |body| {
 					left_context(right_context(CypressTerm::AssignOperation {
-						binding: binding,
+						binding,
 						operation: CypressOperation::EqualsQuery([left_variable, right_variable]),
 						rest: Box::new(body),
 					}))
@@ -197,11 +195,11 @@ pub fn convert_expression_to_cps(
 		},
 		BaseTerm::CaseSplit { ty: _, scrutinee, cases } => {
 			let outcome_continuation = symbol_generator.fresh();
-			let outcome_parameter = CypressVariable::Auto(symbol_generator.fresh());
+			let outcome_parameter = symbol_generator.fresh();
 			let yes_continuation = symbol_generator.fresh();
-			let yes_parameter = CypressVariable::Auto(symbol_generator.fresh());
+			let yes_parameter = symbol_generator.fresh();
 			let no_continuation = symbol_generator.fresh();
-			let no_parameter = CypressVariable::Auto(symbol_generator.fresh());
+			let no_parameter = symbol_generator.fresh();
 
 			let mut yes_term = None;
 			let mut no_term = None;
@@ -221,7 +219,7 @@ pub fn convert_expression_to_cps(
 			let outcome_ty = convert_type_to_cps(ty);
 
 			Some((
-				outcome_parameter.clone(),
+				CypressVariable::Local(outcome_parameter),
 				Box::new(move |body| CypressTerm::DeclareContinuation {
 					label: outcome_continuation,
 					domain: outcome_ty,
@@ -256,42 +254,42 @@ pub fn convert_expression_to_cps(
 // TODO: I wonder if there's a way to refactor this to reduce code duplication?
 pub fn convert_tail_expression_to_cps(
 	base_term: BaseTerm,
-	continuation_label: Option<CypressLabel>,
+	continuation_label: Option<CypressContinuationLabel>,
 	symbol_generator: &mut SymbolGenerator,
 ) -> Option<CypressTerm> {
 	match base_term {
 		BaseTerm::Polarity(x) => {
-			let binding = CypressVariable::Auto(symbol_generator.fresh());
+			let binding = symbol_generator.fresh();
 
 			Some(CypressTerm::AssignValue {
-				binding: binding.clone(),
+				binding,
 				ty: CypressType::Polarity,
-				value: CypressValue::Polarity(x),
+				value: CypressPrimitive::Polarity(x),
 				rest: Box::new(CypressTerm::Continue {
-					label: continuation_label,
-					argument: binding,
+					continuation_label,
+					argument: CypressVariable::Local(binding),
 				}),
 			})
 		},
 		BaseTerm::Integer(x) => {
-			let binding = CypressVariable::Auto(symbol_generator.fresh());
+			let binding = symbol_generator.fresh();
 
 			Some(CypressTerm::AssignValue {
-				binding: binding.clone(),
+				binding,
 				ty: CypressType::Integer,
-				value: CypressValue::Integer(x),
+				value: CypressPrimitive::Integer(x),
 				rest: Box::new(CypressTerm::Continue {
-					label: continuation_label,
-					argument: binding,
+					continuation_label,
+					argument: CypressVariable::Local(binding),
 				}),
 			})
 		},
 		BaseTerm::Name(_, argument) => Some(CypressTerm::Continue {
-			label: continuation_label,
+			continuation_label,
 			argument: convert_variable_to_cps(argument),
 		}),
 		BaseTerm::Tuple(parts) => {
-			let binding = CypressVariable::Auto(symbol_generator.fresh());
+			let binding = symbol_generator.fresh();
 
 			let (part_variables, part_contexts): (Vec<_>, Vec<_>) = parts
 				.into_iter()
@@ -303,26 +301,26 @@ pub fn convert_tail_expression_to_cps(
 			Some(apply_composed(
 				part_contexts.into_iter().rev(),
 				CypressTerm::AssignOperation {
-					binding: binding.clone(),
+					binding,
 					operation: CypressOperation::Pair(part_variables.clone().into_boxed_slice()),
 					rest: Box::new(CypressTerm::Continue {
-						label: continuation_label,
-						argument: binding,
+						continuation_label,
+						argument: CypressVariable::Local(binding),
 					}),
 				},
 			))
 		},
 		BaseTerm::Projection { ty: _, tuple, index } => {
-			let binding = CypressVariable::Auto(symbol_generator.fresh());
+			let binding = symbol_generator.fresh();
 
 			let (tuple_variable, tuple_context) = convert_expression_to_cps(*tuple, symbol_generator)?;
 
 			Some(tuple_context(CypressTerm::AssignOperation {
-				binding: binding.clone(),
+				binding,
 				operation: CypressOperation::Projection(tuple_variable.clone(), index),
 				rest: Box::new(CypressTerm::Continue {
-					label: continuation_label,
-					argument: binding,
+					continuation_label,
+					argument: CypressVariable::Local(binding),
 				}),
 			}))
 		},
@@ -333,19 +331,18 @@ pub fn convert_tail_expression_to_cps(
 			codomain,
 			body,
 		} => {
-			let binding = CypressVariable::Auto(symbol_generator.fresh());
-			let parameter = convert_variable_to_cps(parameter);
+			let binding = symbol_generator.fresh();
 
 			Some(CypressTerm::DeclareFunction {
-				binding: binding.clone(),
-				fixpoint_name: fixpoint_name.map(|name| convert_variable_to_cps(name)),
+				binding,
+				fixpoint_name,
 				domain: convert_type_to_cps(domain),
 				codomain: convert_type_to_cps(codomain),
 				parameter: parameter,
 				body: Box::new(convert_tail_expression_to_cps(*body, None, symbol_generator)?),
 				rest: Box::new(CypressTerm::Continue {
-					label: continuation_label,
-					argument: binding,
+					continuation_label,
+					argument: CypressVariable::Local(binding),
 				}),
 			})
 		},
@@ -374,7 +371,7 @@ pub fn convert_tail_expression_to_cps(
 			Some(CypressTerm::DeclareContinuation {
 				label: inner_continuation_label,
 				domain: convert_type_to_cps(definition.ty()),
-				parameter: convert_variable_to_cps(assignee),
+				parameter: assignee,
 				body: Box::new(convert_tail_expression_to_cps(*rest, continuation_label, symbol_generator)?),
 				rest: Box::new(convert_tail_expression_to_cps(
 					*definition,
@@ -384,25 +381,25 @@ pub fn convert_tail_expression_to_cps(
 			})
 		},
 		BaseTerm::EqualityQuery { left, right } => {
-			let binding = CypressVariable::Auto(symbol_generator.fresh());
+			let binding = symbol_generator.fresh();
 
 			let (left_variable, left_context) = convert_expression_to_cps(*left, symbol_generator)?;
 			let (right_variable, right_context) = convert_expression_to_cps(*right, symbol_generator)?;
 
 			Some(left_context(right_context(CypressTerm::AssignOperation {
-				binding: binding.clone(),
+				binding,
 				operation: CypressOperation::EqualsQuery([left_variable.clone(), right_variable.clone()]),
 				rest: Box::new(CypressTerm::Continue {
-					label: continuation_label,
-					argument: binding,
+					continuation_label,
+					argument: CypressVariable::Local(binding),
 				}),
 			})))
 		},
 		BaseTerm::CaseSplit { ty: _, scrutinee, cases } => {
 			let yes_continuation = symbol_generator.fresh();
-			let yes_parameter = CypressVariable::Auto(symbol_generator.fresh());
+			let yes_parameter = symbol_generator.fresh();
 			let no_continuation = symbol_generator.fresh();
-			let no_parameter = CypressVariable::Auto(symbol_generator.fresh());
+			let no_parameter = symbol_generator.fresh();
 
 			let mut yes_term = None;
 			let mut no_term = None;
