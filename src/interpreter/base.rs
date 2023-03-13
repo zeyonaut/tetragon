@@ -188,7 +188,10 @@ pub fn interpret_base(base_term: BaseTerm, environment: BaseEnvironment) -> Opti
 						interpret_base(
 							(*body).clone(),
 							environment
-								.extend(BaseVariable::Auto(fixpoint.fixpoint_name), BaseValue::RecursiveFunction(fixpoint))
+								.extend(
+									BaseVariable::Auto(fixpoint.fixpoint_name),
+									BaseValue::RecursiveFunction(fixpoint),
+								)
 								.extend(BaseVariable::Auto(parameter), value),
 						)
 					}),

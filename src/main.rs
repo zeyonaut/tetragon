@@ -36,9 +36,7 @@ use parser::{
 	lexer::Lexer,
 	parser::{Node, Parser},
 };
-use translator::{
-	symbol::SymbolGenerator,
-};
+use translator::symbol::SymbolGenerator;
 use utility::*;
 
 use crate::{
@@ -97,7 +95,7 @@ fn main() {
 
 		let now = Instant::now();
 
-		let cypress_value = cypress_term.clone().evaluate(symbol_generator.clone()).expect("Failed to evaluate CPS term.");
+		let cypress_value = cypress_term.clone().evaluate(symbol_generator.clone());
 
 		let elapsed = now.elapsed();
 
@@ -105,9 +103,18 @@ fn main() {
 
 		println!("CPS-converted value: {:#?}", cypress_value);
 
-		let hoisted_program = hoist_program(cypress_term, &mut symbol_generator);
+		let firefly_program = hoist_program(cypress_term, &mut symbol_generator);
 
-		println!("Hoisted program: {:#?}", hoisted_program);
+		//println!("Hoisted program: {:#?}", firefly_program);
+
+		let now = Instant::now();
+
+		let firefly_value = firefly_program.evaluate();
+
+		let elapsed = now.elapsed();
+
+		println!("Elapsed (Firefly): {:#?}", elapsed);
+		println!("Firefly value: {:#?}", firefly_value);
 	} else {
 		panic!("Not a term");
 	}

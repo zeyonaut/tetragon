@@ -53,9 +53,7 @@ pub fn convert_expression_to_cps(
 				}),
 			))
 		},
-		BaseTerm::Name(_, x) => {
-			Some((convert_variable_to_cps(x), Box::new(core::convert::identity)))
-		},
+		BaseTerm::Name(_, x) => Some((convert_variable_to_cps(x), Box::new(core::convert::identity))),
 		BaseTerm::Tuple(parts) => {
 			let binding = symbol_generator.fresh();
 

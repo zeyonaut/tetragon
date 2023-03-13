@@ -237,12 +237,6 @@ pub fn compute_free_variables_in_term(term: &CypressTerm) -> HashSet<CypressBind
 	}
 }
 
-/*
-I'm thinking: in an outer lambda, the environment variables are rebound via let bindings to fresh variables (which are then substituted in the body).
-But in a nested lambda, this nested one gains the environment of the outer as a special environment parameter...
-No, scratch that idea, let's make environments flat. If we're rebinding the environment variables anyway, we might as well use them as the next free variables for any more nested functions.
-*/
-
 pub fn hoist_variable(variable: CypressVariable) -> FireflyVariable {
 	match variable {
 		CypressVariable::Local(x) => FireflyVariable::Local(x),
@@ -307,40 +301,68 @@ pub fn hoist_term(
 			body,
 			rest,
 		} => {
-			let body_free_variables = compute_free_variables_in_term(&body);
+			let mut body_free_variables = compute_free_variables_in_term(&body);
+			body_free_variables.remove(&parameter);
+			fixpoint_name.map(|fixpoint_name| body_free_variables.remove(&fixpoint_name));
 
-			let arguments_to_parameters = body_free_variables
+			let environment_arguments_to_parameters = body_free_variables
 				.iter()
 				.cloned()
-				.map(|argument| {
-					let parameter = symbol_generator.fresh();
-					(argument, parameter)
+				.map(|environment_argument| {
+					let environment_parameter = symbol_generator.fresh();
+					(environment_argument, environment_parameter)
 				})
 				.collect::<HashMap<_, _>>();
 
-			let body = substitute(*body, arguments_to_parameters.clone());
-			let body = hoist_term(body, procedures, symbol_generator);
+			let body = substitute(*body, environment_arguments_to_parameters.clone());
+			let mut body = hoist_term(body, procedures, symbol_generator);
 
-			let parameters_to_arguments = arguments_to_parameters
+			let environment_parameters_to_arguments = environment_arguments_to_parameters
 				.into_iter()
-				.map(|(argument, parameter)| (FireflyBindingLabel(parameter), FireflyBindingLabel(argument)))
+				.map(|(environment_argument, environment_parameter)| {
+					(
+						FireflyBindingLabel(environment_parameter),
+						FireflyBindingLabel(environment_argument),
+					)
+				})
 				.collect::<HashMap<_, _>>();
+
+			let environment_parameters = environment_parameters_to_arguments
+				.iter()
+				.map(|(environment_parameter, _)| environment_parameter)
+				.cloned()
+				.collect::<HashSet<_>>();
+
+			let procedure_label = symbol_generator.fresh();
+
+			if let Some(fixpoint_name) = fixpoint_name {
+				body = FireflyTerm::AssignClosure {
+					binding: FireflyBindingLabel(fixpoint_name),
+					procedure: FireflyProcedureLabel(procedure_label),
+					environment_parameters_to_arguments: environment_parameters
+						.iter()
+						.cloned()
+						.map(|parameter| (parameter, parameter))
+						.collect::<HashMap<_, _>>(),
+					rest: Box::new(body),
+				}
+			}
+
+			// TODO: Surround hoisted body term with let bindings that unpack the locals from the environment. (or do we want to do this at a later stage, such as when translating to Sierra?)
 
 			let procedure = FireflyProcedure {
 				fixpoint_variable: fixpoint_name.map(FireflyBindingLabel),
-				environment_parameters: body_free_variables.into_iter().map(FireflyBindingLabel).collect(),
+				environment_parameters,
 				parameter: FireflyBindingLabel(parameter),
 				body,
 			};
-
-			let procedure_label = symbol_generator.fresh();
 
 			procedures.insert(FireflyProcedureLabel(procedure_label), procedure);
 
 			FireflyTerm::AssignClosure {
 				binding: FireflyBindingLabel(binding),
 				procedure: FireflyProcedureLabel(procedure_label),
-				environment_parameters_to_arguments: parameters_to_arguments,
+				environment_parameters_to_arguments,
 				rest: Box::new(hoist_term(*rest, procedures, symbol_generator)),
 			}
 		},
@@ -394,5 +416,9 @@ pub fn hoist_program(term: CypressTerm, symbol_generator: &mut SymbolGenerator) 
 
 	let entry = hoist_term(term, &mut procedures, symbol_generator);
 
-	FireflyProgram { procedures, entry }
+	FireflyProgram {
+		procedures,
+		entry,
+		symbol_generator: symbol_generator.clone(),
+	}
 }

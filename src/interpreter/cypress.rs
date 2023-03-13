@@ -1,6 +1,6 @@
 use std::{collections::HashMap, hash::Hash, sync::Arc};
 
-use crate::{utility::slice::Slice, translator::symbol::SymbolGenerator};
+use crate::{translator::symbol::SymbolGenerator, utility::slice::Slice};
 
 pub type CypressBindingLabel = u64;
 
@@ -96,8 +96,6 @@ pub enum CypressTerm {
 	},
 	AssignOperation {
 		binding: CypressBindingLabel,
-		// FIXME: Commented out because it's annoying to get the type of a tuple.
-		//ty: CypressType,
 		operation: CypressOperation,
 		rest: Box<Self>,
 	},
@@ -163,7 +161,6 @@ impl CypressTerm {
 		insert_intrinsics(&mut variables, &mut symbol_generator);
 
 		loop {
-			// println!("Evaluating: {:#?}", term);
 			match term.clone() {
 				CypressTerm::AssignValue {
 					binding,
@@ -257,9 +254,15 @@ impl CypressTerm {
 					if let CypressValue::Function(function) = function {
 						let mut next_variables = function.variables.clone();
 						let next_continuations = HashMap::new();
-						next_variables.insert(CypressVariable::Local(function.parameter.clone()), variables.get(&argument)?.clone());
+						next_variables.insert(
+							CypressVariable::Local(function.parameter.clone()),
+							variables.get(&argument)?.clone(),
+						);
 						if let Some(fixpoint_variable) = &function.fixpoint_variable {
-							next_variables.insert(CypressVariable::Local(fixpoint_variable.clone()), CypressValue::Function(function.clone()));
+							next_variables.insert(
+								CypressVariable::Local(fixpoint_variable.clone()),
+								CypressValue::Function(function.clone()),
+							);
 						}
 						if let Some(returner_label) = returner_label {
 							returners.push(continuations.get(&returner_label)?.clone());
@@ -273,7 +276,10 @@ impl CypressTerm {
 						break None;
 					}
 				},
-				CypressTerm::Continue { continuation_label: label, argument } => {
+				CypressTerm::Continue {
+					continuation_label: label,
+					argument,
+				} => {
 					let continuation = if let Some(label) = label {
 						continuations.get(&label).cloned()?
 					} else if let Some(returner) = returners.pop() {
@@ -284,7 +290,10 @@ impl CypressTerm {
 
 					let mut next_variables = continuation.variables.clone();
 					let mut next_continuations = continuation.continuations.clone();
-					next_variables.insert(CypressVariable::Local(continuation.parameter.clone()), variables.get(&argument)?.clone());
+					next_variables.insert(
+						CypressVariable::Local(continuation.parameter.clone()),
+						variables.get(&argument)?.clone(),
+					);
 					if let Some(label) = label {
 						next_continuations.insert(label, continuation.clone());
 					}
@@ -299,7 +308,6 @@ impl CypressTerm {
 	}
 }
 
-// FIXME: Use fresh symbols for each instead of abusing names (which are meant for intrinsics); reflect this change in the types.
 fn insert_intrinsics(variables: &mut HashMap<CypressVariable, CypressValue>, symbol_generator: &mut SymbolGenerator) {
 	{
 		let left = symbol_generator.fresh();
@@ -320,10 +328,7 @@ fn insert_intrinsics(variables: &mut HashMap<CypressVariable, CypressValue>, sym
 					parameter: right,
 					body: Box::new(CypressTerm::AssignOperation {
 						binding: output,
-						operation: CypressOperation::Add([
-							CypressVariable::Local(left),
-							CypressVariable::Local(right),
-						]),
+						operation: CypressOperation::Add([CypressVariable::Local(left), CypressVariable::Local(right)]),
 						rest: Box::new(CypressTerm::Continue {
 							continuation_label: None,
 							argument: CypressVariable::Local(output),
@@ -357,10 +362,7 @@ fn insert_intrinsics(variables: &mut HashMap<CypressVariable, CypressValue>, sym
 						operation: CypressOperation::Projection(CypressVariable::Local(tup), 1),
 						rest: Box::new(CypressTerm::AssignOperation {
 							binding: output,
-							operation: CypressOperation::Add([
-								CypressVariable::Local(left),
-								CypressVariable::Local(right),
-							]),
+							operation: CypressOperation::Add([CypressVariable::Local(left), CypressVariable::Local(right)]),
 							rest: Box::new(CypressTerm::Continue {
 								continuation_label: None,
 								argument: CypressVariable::Local(output),
