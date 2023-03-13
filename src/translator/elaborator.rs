@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::symbol::SymbolGenerator;
+use super::label::{Label, LabelGenerator};
 use crate::{
 	interpreter::base::{BaseTerm, BaseType, BaseVariable},
 	parser::parser::*,
@@ -63,9 +63,9 @@ pub fn elaborate_term(
 	context: Context,
 	parsed_term: ParsedTerm,
 	expected_ty: Option<BaseType>,
-	names: &mut HashMap<u64, String>,
-	numbers: &mut HashMap<String, u64>,
-	symbol_generator: &mut SymbolGenerator,
+	names: &mut HashMap<Label, String>,
+	numbers: &mut HashMap<String, Label>,
+	symbol_generator: &mut LabelGenerator,
 ) -> Option<BaseTerm> {
 	match (expected_ty, parsed_term) {
 		(None, ParsedTerm::Polarity(pole)) => Some(BaseTerm::Polarity(pole)),
@@ -117,7 +117,7 @@ pub fn elaborate_term(
 			let codomain = elaborate_ty(codomain)?;
 
 			let shadowed_parameter_number = numbers.get(&parameter).copied();
-			let bound_parameter_number = symbol_generator.fresh();
+			let [bound_parameter_number] = symbol_generator.fresh();
 			names.insert(bound_parameter_number, parameter.clone());
 			numbers.insert(parameter.clone(), bound_parameter_number);
 
@@ -160,12 +160,12 @@ pub fn elaborate_term(
 				let codomain = elaborate_ty(codomain)?;
 
 				let shadowed_fixpoint_number = numbers.get(&parameter).copied();
-				let bound_fixpoint_number = symbol_generator.fresh();
+				let [bound_fixpoint_number] = symbol_generator.fresh();
 				names.insert(bound_fixpoint_number, mu_binding.clone());
 				numbers.insert(mu_binding.clone(), bound_fixpoint_number);
 
 				let shadowed_parameter_number = numbers.get(&parameter).copied();
-				let bound_parameter_number = symbol_generator.fresh();
+				let [bound_parameter_number] = symbol_generator.fresh();
 				names.insert(bound_parameter_number, parameter.clone());
 				numbers.insert(parameter.clone(), bound_parameter_number);
 
@@ -229,7 +229,7 @@ pub fn elaborate_term(
 			let definition = elaborate_term(context.clone(), *definition, None, names, numbers, symbol_generator)?;
 
 			let shadowed_assignee_number = numbers.get(&binding).copied();
-			let bound_assignee_number = symbol_generator.fresh();
+			let [bound_assignee_number] = symbol_generator.fresh();
 			names.insert(bound_assignee_number, binding.clone());
 			numbers.insert(binding.clone(), bound_assignee_number);
 
@@ -288,8 +288,8 @@ pub fn elaborate_term(
 
 pub fn elaborate_program(
 	parsed_term: ParsedTerm,
-	symbol_generator: &mut SymbolGenerator,
-) -> Option<(BaseTerm, HashMap<u64, String>)> {
+	symbol_generator: &mut LabelGenerator,
+) -> Option<(BaseTerm, HashMap<Label, String>)> {
 	let mut names = HashMap::new();
 	let mut numbers = HashMap::new();
 

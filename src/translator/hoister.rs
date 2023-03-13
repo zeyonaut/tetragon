@@ -1,29 +1,24 @@
-use std::collections::{HashSet};
+use std::collections::HashSet;
+
 use halfbrown::HashMap;
 
-use super::symbol::SymbolGenerator;
+use super::label::{Label, LabelGenerator};
 use crate::interpreter::{
-	cypress::{CypressBindingLabel, CypressOperation, CypressPrimitive, CypressTerm, CypressVariable},
+	cypress::{CypressOperation, CypressPrimitive, CypressTerm, CypressVariable},
 	firefly::{
-		FireflyBindingLabel, FireflyContinuationLabel, FireflyOperation, FireflyPrimitive, FireflyProcedure,
-		FireflyProcedureLabel, FireflyProgram, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyVariable,
+		FireflyOperation, FireflyPrimitive, FireflyProcedure, FireflyProgram, FireflyStatement, FireflyTerm, FireflyTerminator,
+		FireflyVariable,
 	},
 };
 
-fn substitute_in_variable(
-	variable: CypressVariable,
-	substitution: &HashMap<CypressBindingLabel, CypressBindingLabel>,
-) -> CypressVariable {
+fn substitute_in_variable(variable: CypressVariable, substitution: &HashMap<Label, Label>) -> CypressVariable {
 	match variable {
 		CypressVariable::Local(local) => CypressVariable::Local(substitution.get(&local).cloned().unwrap_or(local)),
 		other => other,
 	}
 }
 
-pub fn substitute_in_operation(
-	operation: CypressOperation,
-	substitution: &HashMap<CypressBindingLabel, CypressBindingLabel>,
-) -> CypressOperation {
+pub fn substitute_in_operation(operation: CypressOperation, substitution: &HashMap<Label, Label>) -> CypressOperation {
 	match operation {
 		CypressOperation::EqualsQuery(xs) => CypressOperation::EqualsQuery(xs.map(|x| substitute_in_variable(x, substitution))),
 		CypressOperation::Projection(tuple, index) => {
@@ -40,7 +35,7 @@ pub fn substitute_in_operation(
 	}
 }
 
-pub fn substitute(term: CypressTerm, mut substitution: HashMap<CypressBindingLabel, CypressBindingLabel>) -> CypressTerm {
+pub fn substitute(term: CypressTerm, mut substitution: HashMap<Label, Label>) -> CypressTerm {
 	match term {
 		CypressTerm::AssignValue {
 			binding,
@@ -151,7 +146,7 @@ pub fn substitute(term: CypressTerm, mut substitution: HashMap<CypressBindingLab
 	}
 }
 
-fn get_if_local(variable: &CypressVariable) -> Option<CypressBindingLabel> {
+fn get_if_local(variable: &CypressVariable) -> Option<Label> {
 	if let CypressVariable::Local(label) = variable {
 		Some(label.clone())
 	} else {
@@ -159,7 +154,7 @@ fn get_if_local(variable: &CypressVariable) -> Option<CypressBindingLabel> {
 	}
 }
 
-pub fn compute_free_variables_in_operation(operation: &CypressOperation) -> HashSet<CypressBindingLabel> {
+pub fn compute_free_variables_in_operation(operation: &CypressOperation) -> HashSet<Label> {
 	match operation {
 		CypressOperation::EqualsQuery(x) => x.into_iter().filter_map(get_if_local).collect(),
 		CypressOperation::Projection(tuple, _) => [tuple].into_iter().filter_map(get_if_local).collect(),
@@ -168,7 +163,7 @@ pub fn compute_free_variables_in_operation(operation: &CypressOperation) -> Hash
 	}
 }
 
-pub fn compute_free_variables_in_term(term: &CypressTerm) -> HashSet<CypressBindingLabel> {
+pub fn compute_free_variables_in_term(term: &CypressTerm) -> HashSet<Label> {
 	match term {
 		CypressTerm::AssignValue {
 			binding,
@@ -270,8 +265,8 @@ pub fn hoist_operation(operation: CypressOperation) -> FireflyOperation {
 
 pub fn hoist_term(
 	term: CypressTerm,
-	procedures: &mut HashMap<FireflyProcedureLabel, FireflyProcedure>,
-	symbol_generator: &mut SymbolGenerator,
+	procedures: &mut HashMap<Label, FireflyProcedure>,
+	symbol_generator: &mut LabelGenerator,
 ) -> FireflyTerm {
 	match term {
 		CypressTerm::AssignValue {
@@ -282,7 +277,7 @@ pub fn hoist_term(
 		} => {
 			let mut rest = hoist_term(*rest, procedures, symbol_generator);
 			rest.statements.push(FireflyStatement::AssignPrimitive {
-				binding: FireflyBindingLabel(binding),
+				binding,
 				value: hoist_primitive(value),
 			});
 			rest
@@ -294,7 +289,7 @@ pub fn hoist_term(
 		} => {
 			let mut rest = hoist_term(*rest, procedures, symbol_generator);
 			rest.statements.push(FireflyStatement::AssignOperation {
-				binding: FireflyBindingLabel(binding),
+				binding,
 				operation: hoist_operation(operation),
 			});
 			rest
@@ -316,7 +311,7 @@ pub fn hoist_term(
 				.iter()
 				.cloned()
 				.map(|environment_argument| {
-					let environment_parameter = symbol_generator.fresh();
+					let [environment_parameter] = symbol_generator.fresh();
 					(environment_argument, environment_parameter)
 				})
 				.collect::<HashMap<_, _>>();
@@ -326,12 +321,7 @@ pub fn hoist_term(
 
 			let environment_parameters_to_arguments = environment_arguments_to_parameters
 				.into_iter()
-				.map(|(environment_argument, environment_parameter)| {
-					(
-						FireflyBindingLabel(environment_parameter),
-						FireflyBindingLabel(environment_argument),
-					)
-				})
+				.map(|(environment_argument, environment_parameter)| (environment_parameter, environment_argument))
 				.collect::<HashMap<_, _>>();
 
 			let environment_parameters = environment_parameters_to_arguments
@@ -340,12 +330,12 @@ pub fn hoist_term(
 				.cloned()
 				.collect::<HashSet<_>>();
 
-			let procedure_label = symbol_generator.fresh();
+			let [procedure_label] = symbol_generator.fresh();
 
 			if let Some(fixpoint_name) = fixpoint_name {
 				body.statements.push(FireflyStatement::AssignClosure {
-					binding: FireflyBindingLabel(fixpoint_name),
-					procedure: FireflyProcedureLabel(procedure_label),
+					binding: fixpoint_name,
+					procedure: procedure_label,
 					environment_parameters_to_arguments: environment_parameters
 						.iter()
 						.cloned()
@@ -357,19 +347,19 @@ pub fn hoist_term(
 			// TODO: Surround hoisted body term with let bindings that unpack the locals from the environment. (or do we want to do this at a later stage, such as when translating to Sierra?)
 
 			let procedure = FireflyProcedure {
-				fixpoint_variable: fixpoint_name.map(FireflyBindingLabel),
+				fixpoint_variable: fixpoint_name,
 				environment_parameters,
-				parameter: FireflyBindingLabel(parameter),
+				parameter,
 				body,
 			};
 
-			procedures.insert(FireflyProcedureLabel(procedure_label), procedure);
+			procedures.insert(procedure_label, procedure);
 
 			let mut rest = hoist_term(*rest, procedures, symbol_generator);
 
 			rest.statements.push(FireflyStatement::AssignClosure {
-				binding: FireflyBindingLabel(binding),
-				procedure: FireflyProcedureLabel(procedure_label),
+				binding,
+				procedure: procedure_label,
 				environment_parameters_to_arguments,
 			});
 
@@ -384,8 +374,8 @@ pub fn hoist_term(
 		} => {
 			let mut rest = hoist_term(*rest, procedures, symbol_generator);
 			rest.statements.push(FireflyStatement::DeclareContinuation {
-				label: FireflyContinuationLabel(label),
-				parameter: FireflyBindingLabel(parameter),
+				label,
+				parameter,
 				body: hoist_term(*body, procedures, symbol_generator),
 			});
 			rest
@@ -396,8 +386,8 @@ pub fn hoist_term(
 			no_continuation,
 		} => FireflyTerm::new(FireflyTerminator::Branch {
 			scrutinee: hoist_variable(scrutinee),
-			yes_continuation: FireflyContinuationLabel(yes_continuation),
-			no_continuation: FireflyContinuationLabel(no_continuation),
+			yes_continuation: yes_continuation,
+			no_continuation: no_continuation,
 		}),
 		CypressTerm::Apply {
 			function,
@@ -405,14 +395,14 @@ pub fn hoist_term(
 			argument,
 		} => FireflyTerm::new(FireflyTerminator::Apply {
 			closure: hoist_variable(function),
-			continuation_label: continuation.map(FireflyContinuationLabel),
+			continuation_label: continuation,
 			argument: hoist_variable(argument),
 		}),
 		CypressTerm::Continue {
 			continuation_label,
 			argument,
 		} => FireflyTerm::new(FireflyTerminator::Jump {
-			continuation_label: continuation_label.map(FireflyContinuationLabel),
+			continuation_label,
 			argument: hoist_variable(argument),
 		}),
 		CypressTerm::Halt { argument } => FireflyTerm::new(FireflyTerminator::Halt {
@@ -423,8 +413,8 @@ pub fn hoist_term(
 
 // Closure conversion turns functions, which may have free variables, into closures, which bundle a procedure label and an environment.
 // All nested function declarations are hoisted to the top level of the program as first-order procedures.
-pub fn hoist_program(term: CypressTerm, symbol_generator: &mut SymbolGenerator) -> FireflyProgram {
-	let mut procedures = HashMap::<FireflyProcedureLabel, FireflyProcedure>::new();
+pub fn hoist_program(term: CypressTerm, symbol_generator: &mut LabelGenerator) -> FireflyProgram {
+	let mut procedures = HashMap::<Label, FireflyProcedure>::new();
 
 	let entry = hoist_term(term, &mut procedures, symbol_generator);
 

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-pub type BaseBindingLabel = u64;
+use crate::translator::label::Label;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BaseVariable {
-	Auto(BaseBindingLabel),
+	Auto(Label),
 	Name(String),
 }
 
@@ -22,8 +22,8 @@ pub enum BaseTerm {
 	Function {
 		domain: BaseType,
 		codomain: BaseType,
-		fixpoint_name: Option<BaseBindingLabel>,
-		parameter: BaseBindingLabel,
+		fixpoint_name: Option<Label>,
+		parameter: Label,
 		body: Box<Self>,
 	},
 	Application {
@@ -33,7 +33,7 @@ pub enum BaseTerm {
 	},
 	Assignment {
 		ty: BaseType,
-		assignee: BaseBindingLabel,
+		assignee: Label,
 		definition: Box<Self>,
 		rest: Box<Self>,
 	},
@@ -99,7 +99,7 @@ pub enum BaseType {
 
 #[derive(Clone)]
 pub struct RecursiveFunction {
-	fixpoint_name: BaseBindingLabel,
+	fixpoint_name: Label,
 	function: Arc<dyn (Fn(Self, BaseValue) -> Option<BaseValue>)>,
 }
 

@@ -1,16 +1,15 @@
 use std::{collections::HashMap, hash::Hash, sync::Arc};
 
-use crate::{translator::symbol::SymbolGenerator, utility::slice::Slice};
-
-pub type CypressBindingLabel = u64;
+use crate::{
+	translator::label::{Label, LabelGenerator},
+	utility::slice::Slice,
+};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum CypressVariable {
-	Local(CypressBindingLabel),
+	Local(Label),
 	Name(String),
 }
-
-pub type CypressContinuationLabel = u64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CypressType {
@@ -89,44 +88,44 @@ impl CypressOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CypressTerm {
 	AssignValue {
-		binding: CypressBindingLabel,
+		binding: Label,
 		ty: CypressType,
 		value: CypressPrimitive,
 		rest: Box<Self>,
 	},
 	AssignOperation {
-		binding: CypressBindingLabel,
+		binding: Label,
 		operation: CypressOperation,
 		rest: Box<Self>,
 	},
 	DeclareFunction {
-		binding: CypressBindingLabel,
-		fixpoint_name: Option<CypressBindingLabel>,
+		binding: Label,
+		fixpoint_name: Option<Label>,
 		domain: CypressType,
 		codomain: CypressType,
-		parameter: CypressBindingLabel,
+		parameter: Label,
 		body: Box<Self>,
 		rest: Box<Self>,
 	},
 	DeclareContinuation {
-		label: CypressContinuationLabel,
+		label: Label,
 		domain: CypressType,
-		parameter: CypressBindingLabel,
+		parameter: Label,
 		body: Box<Self>,
 		rest: Box<Self>,
 	},
 	CaseSplit {
 		scrutinee: CypressVariable,
-		yes_continuation: CypressContinuationLabel,
-		no_continuation: CypressContinuationLabel,
+		yes_continuation: Label,
+		no_continuation: Label,
 	}, // Continuations should have unit domain. (For now.) Scrutinee should be a polarity.
 	Apply {
 		function: CypressVariable,
-		continuation: Option<CypressContinuationLabel>,
+		continuation: Option<Label>,
 		argument: CypressVariable,
 	},
 	Continue {
-		continuation_label: Option<CypressContinuationLabel>,
+		continuation_label: Option<Label>,
 		argument: CypressVariable,
 	},
 	Halt {
@@ -137,25 +136,25 @@ pub enum CypressTerm {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CypressFunction {
 	pub identifier: CypressVariable,
-	pub fixpoint_variable: Option<CypressBindingLabel>,
-	pub parameter: CypressBindingLabel,
+	pub fixpoint_variable: Option<Label>,
+	pub parameter: Label,
 	pub body: CypressTerm,
 	pub variables: HashMap<CypressVariable, CypressValue>,
 }
 
 #[derive(Clone, Debug)]
 struct CypressContinuation {
-	parameter: CypressBindingLabel,
+	parameter: Label,
 	body: CypressTerm,
 	variables: HashMap<CypressVariable, CypressValue>,
-	continuations: HashMap<CypressContinuationLabel, Arc<CypressContinuation>>,
+	continuations: HashMap<Label, Arc<CypressContinuation>>,
 }
 
 impl CypressTerm {
-	pub fn evaluate(self, mut symbol_generator: SymbolGenerator) -> Option<CypressValue> {
+	pub fn evaluate(self, mut symbol_generator: LabelGenerator) -> Option<CypressValue> {
 		let mut term = self;
 		let mut variables: HashMap<CypressVariable, CypressValue> = HashMap::new();
-		let mut continuations: HashMap<CypressContinuationLabel, Arc<CypressContinuation>> = HashMap::new();
+		let mut continuations: HashMap<Label, Arc<CypressContinuation>> = HashMap::new();
 		let mut returners: Vec<Arc<CypressContinuation>> = Vec::new();
 
 		insert_intrinsics(&mut variables, &mut symbol_generator);
@@ -308,12 +307,9 @@ impl CypressTerm {
 	}
 }
 
-fn insert_intrinsics(variables: &mut HashMap<CypressVariable, CypressValue>, symbol_generator: &mut SymbolGenerator) {
+fn insert_intrinsics(variables: &mut HashMap<CypressVariable, CypressValue>, symbol_generator: &mut LabelGenerator) {
 	{
-		let left = symbol_generator.fresh();
-		let right = symbol_generator.fresh();
-		let add_inner = symbol_generator.fresh();
-		let output = symbol_generator.fresh();
+		let [left, right, add_inner, output] = symbol_generator.fresh();
 		variables.insert(
 			CypressVariable::Name("add".to_owned()),
 			CypressValue::Function(Arc::new(CypressFunction {
@@ -344,10 +340,7 @@ fn insert_intrinsics(variables: &mut HashMap<CypressVariable, CypressValue>, sym
 		);
 	}
 	{
-		let tup = symbol_generator.fresh();
-		let left = symbol_generator.fresh();
-		let right = symbol_generator.fresh();
-		let output = symbol_generator.fresh();
+		let [tup, left, right, output] = symbol_generator.fresh();
 		variables.insert(
 			CypressVariable::Name("add2".to_owned()),
 			CypressValue::Function(Arc::new(CypressFunction {

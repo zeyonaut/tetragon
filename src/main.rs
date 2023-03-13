@@ -38,7 +38,7 @@ use parser::{
 	lexer::Lexer,
 	parser::{Node, Parser},
 };
-use translator::symbol::SymbolGenerator;
+use translator::label::LabelGenerator;
 use utility::*;
 
 use crate::{
@@ -60,7 +60,7 @@ fn main() {
 	let expression = parser.parse(lexer).unwrap();
 
 	if let Node::Term(parsed_term) = expression {
-		let mut symbol_generator = SymbolGenerator::new();
+		let mut symbol_generator = LabelGenerator::new();
 
 		let (elaborated_term, _) = elaborate_program(parsed_term, &mut symbol_generator).expect("Elaboration failed.");
 
@@ -70,13 +70,13 @@ fn main() {
 
 		let now = Instant::now();
 
-		let interpreted_value = evaluate_base(elaborated_term.clone());
+		//let interpreted_value = evaluate_base(elaborated_term.clone());
 
 		let elapsed = now.elapsed();
 
 		println!("Elapsed (Base): {:.2?}", elapsed);
 
-		println!("Interpreted value: {:#?}", interpreted_value);
+		//println!("Interpreted value: {:#?}", interpreted_value);
 
 		let cypress_term =
 			convert_program_to_cps(elaborated_term, &mut symbol_generator).expect("Failed to convert base term to CPS.");
