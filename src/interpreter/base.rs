@@ -250,3 +250,19 @@ pub fn interpret_base(base_term: BaseTerm, environment: BaseEnvironment) -> Opti
 		},
 	}
 }
+
+pub fn evaluate_base(base_term: BaseTerm) -> Option<BaseValue> {
+	interpret_base(
+		base_term,
+		BaseEnvironment::new(vec![(
+			BaseVariable::Name("add".to_owned()),
+			BaseValue::Function(Arc::new(|value_0| match value_0 {
+				BaseValue::Integer(x) => Some(BaseValue::Function(Arc::new(move |value_1| match value_1 {
+					BaseValue::Integer(y) => Some(BaseValue::Integer(x + y)),
+					_ => None,
+				}))),
+				_ => None,
+			})),
+		)]),
+	)
+}

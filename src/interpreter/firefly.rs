@@ -1,9 +1,10 @@
 use std::{
-	collections::{HashMap, HashSet},
+	collections::{HashSet},
 	hash::Hash,
 	sync::Arc,
 };
 
+use halfbrown::HashMap;
 use crate::{translator::symbol::SymbolGenerator, utility::slice::Slice};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -47,11 +48,11 @@ pub enum FireflyPrimitive {
 
 // TODO: Factor out duplicated code across CPS representations.
 impl FireflyPrimitive {
-	fn evaluate(self) -> FireflyValue {
+	fn evaluate(&self) -> FireflyValue {
 		match self {
 			Self::Unity => FireflyValue::Unity,
-			Self::Polarity(x) => FireflyValue::Polarity(x),
-			Self::Integer(x) => FireflyValue::Integer(x),
+			Self::Polarity(x) => FireflyValue::Polarity(*x),
+			Self::Integer(x) => FireflyValue::Integer(*x),
 		}
 	}
 }
@@ -67,7 +68,7 @@ pub enum FireflyOperation {
 // TODO: Factor out duplicated code across CPS representations.
 impl FireflyOperation {
 	fn evaluate(
-		self,
+		&self,
 		intrinsics: &HashMap<String, FireflyValue>,
 		variables: &HashMap<FireflyBindingLabel, FireflyValue>,
 	) -> Option<FireflyValue> {
@@ -78,7 +79,7 @@ impl FireflyOperation {
 			)),
 			FireflyOperation::Projection(tuple, index) => {
 				if let Tuple(parts) = lookup(intrinsics, variables, &tuple)? {
-					parts.get(index).cloned()
+					parts.get(*index).cloned()
 				} else {
 					None
 				}
@@ -104,29 +105,29 @@ impl FireflyOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FireflyTerm {
+pub enum FireflyStatement {
 	AssignPrimitive {
 		binding: FireflyBindingLabel,
 		value: FireflyPrimitive,
-		rest: Box<Self>,
 	},
 	AssignOperation {
 		binding: FireflyBindingLabel,
 		operation: FireflyOperation,
-		rest: Box<Self>,
 	},
 	AssignClosure {
 		binding: FireflyBindingLabel,
 		procedure: FireflyProcedureLabel,
 		environment_parameters_to_arguments: HashMap<FireflyBindingLabel, FireflyBindingLabel>,
-		rest: Box<Self>,
 	},
 	DeclareContinuation {
 		label: FireflyContinuationLabel,
 		parameter: FireflyBindingLabel,
-		body: Box<Self>,
-		rest: Box<Self>,
+		body: FireflyTerm,
 	},
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FireflyTerminator {
 	Branch {
 		scrutinee: FireflyVariable,
 		yes_continuation: FireflyContinuationLabel,
@@ -146,6 +147,22 @@ pub enum FireflyTerm {
 	},
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FireflyTerm {
+	// Stored as a stack: the last statement is the first.
+	pub statements: Vec<FireflyStatement>,
+	pub terminator: FireflyTerminator,
+}
+
+impl FireflyTerm {
+	pub fn new(terminator: FireflyTerminator) -> Self {
+		Self {
+			statements: Vec::new(),
+			terminator,
+		}
+	}
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FireflyProcedure {
 	pub fixpoint_variable: Option<FireflyBindingLabel>,
@@ -155,9 +172,9 @@ pub struct FireflyProcedure {
 }
 
 #[derive(Clone, Debug)]
-struct FireflyContinuation {
+struct FireflyContinuation<'a> {
 	parameter: FireflyBindingLabel,
-	body: FireflyTerm,
+	body: &'a FireflyTerm,
 }
 
 #[derive(Debug)]
@@ -170,57 +187,44 @@ pub struct FireflyProgram {
 impl FireflyProgram {
 	pub fn evaluate(mut self) -> Option<FireflyValue> {
 		let mut intrinsics = self.insert_intrinsics();
-		let mut term = self.entry;
+		let mut term = &self.entry;
 		let mut return_stack = Vec::<(FireflyContinuationLabel, HashMap<FireflyBindingLabel, FireflyValue>)>::new();
-		let mut continuations: HashMap<FireflyContinuationLabel, Arc<FireflyContinuation>> = HashMap::new();
+		let mut continuations: HashMap<FireflyContinuationLabel, FireflyContinuation> = HashMap::new();
 		let mut environment = HashMap::<FireflyBindingLabel, FireflyValue>::new();
 		loop {
-			match term {
-				FireflyTerm::AssignPrimitive { binding, value, rest } => {
-					environment.insert(binding, value.evaluate());
+			for statement in term.statements.iter().rev() {
+				match statement {
+					FireflyStatement::AssignPrimitive { binding, value } => {
+						environment.insert(binding.clone(), value.evaluate());
+					},
+					FireflyStatement::AssignOperation { binding, operation } => {
+						environment.insert(binding.clone(), operation.evaluate(&intrinsics, &environment)?);
+					},
+					FireflyStatement::AssignClosure {
+						binding,
+						procedure,
+						environment_parameters_to_arguments,
+					} => {
+						let environment_parameters_to_arguments = environment_parameters_to_arguments
+							.into_iter()
+							.map(|(k, v)| Some((k.clone(), environment.get(&v).cloned()?)))
+							.collect::<Option<HashMap<_, _>>>()?;
+						environment.insert(
+							binding.clone(),
+							FireflyValue::Closure(procedure.clone(), environment_parameters_to_arguments),
+						);
+					},
+					FireflyStatement::DeclareContinuation { label, parameter, body } => {
+						continuations.entry(label.clone()).or_insert_with(|| FireflyContinuation {
+							parameter: parameter.clone(),
+							body,
+						});
+					},
+				}
+			}
 
-					term = (*rest).clone();
-					continue;
-				},
-				FireflyTerm::AssignOperation {
-					binding,
-					operation,
-					rest,
-				} => {
-					environment.insert(binding, operation.evaluate(&intrinsics, &environment)?);
-
-					term = *rest;
-					continue;
-				},
-				FireflyTerm::AssignClosure {
-					binding,
-					procedure,
-					environment_parameters_to_arguments,
-					rest,
-				} => {
-					let environment_parameters_to_arguments = environment_parameters_to_arguments
-						.into_iter()
-						.map(|(k, v)| Some((k, environment.get(&v).cloned()?)))
-						.collect::<Option<HashMap<_, _>>>()?;
-					environment.insert(binding, FireflyValue::Closure(procedure, environment_parameters_to_arguments));
-
-					term = (*rest).clone();
-					continue;
-				},
-				FireflyTerm::DeclareContinuation {
-					label,
-					parameter,
-					body,
-					rest,
-				} => {
-					continuations
-						.entry(label)
-						.or_insert_with(|| Arc::new(FireflyContinuation { parameter, body: *body }));
-
-					term = (*rest).clone();
-					continue;
-				},
-				FireflyTerm::Branch {
+			term = match &term.terminator {
+				FireflyTerminator::Branch {
 					scrutinee,
 					yes_continuation,
 					no_continuation,
@@ -230,13 +234,12 @@ impl FireflyProgram {
 
 						let continuation = continuations.get(&continuation_label)?;
 
-						term = continuation.body.clone();
-						continue;
+						continuation.body
 					} else {
-						break None;
+						return None;
 					}
 				},
-				FireflyTerm::Apply {
+				FireflyTerminator::Apply {
 					closure,
 					continuation_label,
 					argument,
@@ -246,41 +249,39 @@ impl FireflyProgram {
 						let procedure = self.procedures.get(&procedure_label)?;
 
 						if let Some(continuation_label) = continuation_label {
-							return_stack.push((continuation_label, environment.clone()));
+							return_stack.push((continuation_label.clone(), environment.clone()));
 						}
 
 						let argument = lookup(&intrinsics, &environment, &argument)?;
 						environment = environment_parameters_to_arguments;
 						environment.insert(procedure.parameter, argument);
 
-						term = procedure.body.clone();
+						&procedure.body
 					} else {
-						break None;
+						return None;
 					}
 				},
-				FireflyTerm::Jump {
+				FireflyTerminator::Jump {
 					continuation_label,
 					argument,
 				} => {
 					if let Some(label) = continuation_label {
 						let continuation = continuations.get(&label).cloned()?;
-						term = continuation.body.clone();
 						environment.insert(continuation.parameter, lookup(&intrinsics, &environment, &argument)?);
-						continue;
+						continuation.body
 					} else if let Some((returner_label, mut returner_environment)) = return_stack.pop() {
 						let continuation = continuations.get(&returner_label).cloned()?;
-						term = continuation.body.clone();
 						returner_environment.insert(continuation.parameter, lookup(&intrinsics, &environment, &argument)?);
 						environment = returner_environment;
-						continue;
+						continuation.body
 					} else {
-						break lookup(&intrinsics, &environment, &argument);
-					};
+						return lookup(&intrinsics, &environment, &argument);
+					}
 				},
-				FireflyTerm::Halt { argument } => {
-					break match argument {
-						FireflyVariable::Local(argument) => environment.remove(&FireflyBindingLabel(argument)),
-						FireflyVariable::Global(argument) => intrinsics.remove(&argument),
+				FireflyTerminator::Halt { argument } => {
+					return match argument {
+						FireflyVariable::Local(argument) => environment.remove(&FireflyBindingLabel(*argument)),
+						FireflyVariable::Global(argument) => intrinsics.remove(argument),
 					}
 				},
 			}
@@ -302,16 +303,18 @@ impl FireflyProgram {
 						fixpoint_variable: None,
 						environment_parameters: HashSet::from([left_inner]),
 						parameter: right,
-						body: FireflyTerm::AssignOperation {
-							binding: output,
-							operation: FireflyOperation::Add([
-								FireflyVariable::Local(left_inner.0),
-								FireflyVariable::Local(right.0),
-							]),
-							rest: Box::new(FireflyTerm::Jump {
+						body: FireflyTerm {
+							statements: vec![FireflyStatement::AssignOperation {
+								binding: output,
+								operation: FireflyOperation::Add([
+									FireflyVariable::Local(left_inner.0),
+									FireflyVariable::Local(right.0),
+								]),
+							}],
+							terminator: FireflyTerminator::Jump {
 								continuation_label: None,
 								argument: FireflyVariable::Local(output.0),
-							}),
+							},
 						},
 					},
 				);
@@ -327,14 +330,16 @@ impl FireflyProgram {
 					fixpoint_variable: None,
 					environment_parameters: HashSet::new(),
 					parameter: FireflyBindingLabel(left),
-					body: FireflyTerm::AssignClosure {
-						binding: FireflyBindingLabel(add_inner_closure),
-						procedure: add_inner,
-						environment_parameters_to_arguments: HashMap::from([(left_inner, FireflyBindingLabel(left))]),
-						rest: Box::new(FireflyTerm::Jump {
+					body: FireflyTerm {
+						statements: vec![FireflyStatement::AssignClosure {
+							binding: FireflyBindingLabel(add_inner_closure),
+							procedure: add_inner,
+							environment_parameters_to_arguments: hashmap![left_inner =>FireflyBindingLabel(left)],
+						}],
+						terminator: FireflyTerminator::Jump {
 							continuation_label: None,
 							argument: FireflyVariable::Local(add_inner_closure),
-						}),
+						},
 					},
 				},
 			);
@@ -357,21 +362,25 @@ impl FireflyProgram {
 					fixpoint_variable: None,
 					environment_parameters: HashSet::new(),
 					parameter: FireflyBindingLabel(input),
-					body: FireflyTerm::AssignOperation {
-						binding: FireflyBindingLabel(left),
-						operation: FireflyOperation::Projection(FireflyVariable::Local(input), 0),
-						rest: Box::new(FireflyTerm::AssignOperation {
-							binding: FireflyBindingLabel(right),
-							operation: FireflyOperation::Projection(FireflyVariable::Local(input), 1),
-							rest: Box::new(FireflyTerm::AssignOperation {
+					body: FireflyTerm {
+						statements: vec![
+							FireflyStatement::AssignOperation {
 								binding: FireflyBindingLabel(output),
 								operation: FireflyOperation::Add([FireflyVariable::Local(left), FireflyVariable::Local(right)]),
-								rest: Box::new(FireflyTerm::Jump {
-									continuation_label: None,
-									argument: FireflyVariable::Local(output),
-								}),
-							}),
-						}),
+							},
+							FireflyStatement::AssignOperation {
+								binding: FireflyBindingLabel(right),
+								operation: FireflyOperation::Projection(FireflyVariable::Local(input), 1),
+							},
+							FireflyStatement::AssignOperation {
+								binding: FireflyBindingLabel(left),
+								operation: FireflyOperation::Projection(FireflyVariable::Local(input), 0),
+							},
+						],
+						terminator: FireflyTerminator::Jump {
+							continuation_label: None,
+							argument: FireflyVariable::Local(output),
+						},
 					},
 				},
 			);

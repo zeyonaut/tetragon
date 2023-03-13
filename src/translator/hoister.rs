@@ -1,11 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashSet};
+use halfbrown::HashMap;
 
 use super::symbol::SymbolGenerator;
 use crate::interpreter::{
 	cypress::{CypressBindingLabel, CypressOperation, CypressPrimitive, CypressTerm, CypressVariable},
 	firefly::{
 		FireflyBindingLabel, FireflyContinuationLabel, FireflyOperation, FireflyPrimitive, FireflyProcedure,
-		FireflyProcedureLabel, FireflyProgram, FireflyTerm, FireflyVariable,
+		FireflyProcedureLabel, FireflyProgram, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyVariable,
 	},
 };
 
@@ -278,19 +279,25 @@ pub fn hoist_term(
 			ty: _,
 			value,
 			rest,
-		} => FireflyTerm::AssignPrimitive {
-			binding: FireflyBindingLabel(binding),
-			value: hoist_primitive(value),
-			rest: Box::new(hoist_term(*rest, procedures, symbol_generator)),
+		} => {
+			let mut rest = hoist_term(*rest, procedures, symbol_generator);
+			rest.statements.push(FireflyStatement::AssignPrimitive {
+				binding: FireflyBindingLabel(binding),
+				value: hoist_primitive(value),
+			});
+			rest
 		},
 		CypressTerm::AssignOperation {
 			binding,
 			operation,
 			rest,
-		} => FireflyTerm::AssignOperation {
-			binding: FireflyBindingLabel(binding),
-			operation: hoist_operation(operation),
-			rest: Box::new(hoist_term(*rest, procedures, symbol_generator)),
+		} => {
+			let mut rest = hoist_term(*rest, procedures, symbol_generator);
+			rest.statements.push(FireflyStatement::AssignOperation {
+				binding: FireflyBindingLabel(binding),
+				operation: hoist_operation(operation),
+			});
+			rest
 		},
 		CypressTerm::DeclareFunction {
 			binding,
@@ -336,7 +343,7 @@ pub fn hoist_term(
 			let procedure_label = symbol_generator.fresh();
 
 			if let Some(fixpoint_name) = fixpoint_name {
-				body = FireflyTerm::AssignClosure {
+				body.statements.push(FireflyStatement::AssignClosure {
 					binding: FireflyBindingLabel(fixpoint_name),
 					procedure: FireflyProcedureLabel(procedure_label),
 					environment_parameters_to_arguments: environment_parameters
@@ -344,8 +351,7 @@ pub fn hoist_term(
 						.cloned()
 						.map(|parameter| (parameter, parameter))
 						.collect::<HashMap<_, _>>(),
-					rest: Box::new(body),
-				}
+				});
 			}
 
 			// TODO: Surround hoisted body term with let bindings that unpack the locals from the environment. (or do we want to do this at a later stage, such as when translating to Sierra?)
@@ -359,12 +365,15 @@ pub fn hoist_term(
 
 			procedures.insert(FireflyProcedureLabel(procedure_label), procedure);
 
-			FireflyTerm::AssignClosure {
+			let mut rest = hoist_term(*rest, procedures, symbol_generator);
+
+			rest.statements.push(FireflyStatement::AssignClosure {
 				binding: FireflyBindingLabel(binding),
 				procedure: FireflyProcedureLabel(procedure_label),
 				environment_parameters_to_arguments,
-				rest: Box::new(hoist_term(*rest, procedures, symbol_generator)),
-			}
+			});
+
+			rest
 		},
 		CypressTerm::DeclareContinuation {
 			label,
@@ -372,40 +381,43 @@ pub fn hoist_term(
 			parameter,
 			body,
 			rest,
-		} => FireflyTerm::DeclareContinuation {
-			label: FireflyContinuationLabel(label),
-			parameter: FireflyBindingLabel(parameter),
-			body: Box::new(hoist_term(*body, procedures, symbol_generator)),
-			rest: Box::new(hoist_term(*rest, procedures, symbol_generator)),
+		} => {
+			let mut rest = hoist_term(*rest, procedures, symbol_generator);
+			rest.statements.push(FireflyStatement::DeclareContinuation {
+				label: FireflyContinuationLabel(label),
+				parameter: FireflyBindingLabel(parameter),
+				body: hoist_term(*body, procedures, symbol_generator),
+			});
+			rest
 		},
 		CypressTerm::CaseSplit {
 			scrutinee,
 			yes_continuation,
 			no_continuation,
-		} => FireflyTerm::Branch {
+		} => FireflyTerm::new(FireflyTerminator::Branch {
 			scrutinee: hoist_variable(scrutinee),
 			yes_continuation: FireflyContinuationLabel(yes_continuation),
 			no_continuation: FireflyContinuationLabel(no_continuation),
-		},
+		}),
 		CypressTerm::Apply {
 			function,
 			continuation,
 			argument,
-		} => FireflyTerm::Apply {
+		} => FireflyTerm::new(FireflyTerminator::Apply {
 			closure: hoist_variable(function),
 			continuation_label: continuation.map(FireflyContinuationLabel),
 			argument: hoist_variable(argument),
-		},
+		}),
 		CypressTerm::Continue {
 			continuation_label,
 			argument,
-		} => FireflyTerm::Jump {
+		} => FireflyTerm::new(FireflyTerminator::Jump {
 			continuation_label: continuation_label.map(FireflyContinuationLabel),
 			argument: hoist_variable(argument),
-		},
-		CypressTerm::Halt { argument } => FireflyTerm::Halt {
+		}),
+		CypressTerm::Halt { argument } => FireflyTerm::new(FireflyTerminator::Halt {
 			argument: hoist_variable(argument),
-		},
+		}),
 	}
 }
 

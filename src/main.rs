@@ -14,8 +14,10 @@
 // REASON: Reduces warning noise while prototyping.
 #![allow(dead_code, unused_macros)]
 
-#[macro_use]
+#[macro_use(btreemap, btreeset)]
 extern crate maplit;
+#[macro_use(hashmap)]
+extern crate halfbrown;
 
 #[path = "generator/_.rs"]
 mod generator;
@@ -40,7 +42,7 @@ use translator::symbol::SymbolGenerator;
 use utility::*;
 
 use crate::{
-	interpreter::base::{interpret_base, BaseEnvironment, BaseValue, BaseVariable},
+	interpreter::base::{evaluate_base, interpret_base, BaseEnvironment, BaseValue, BaseVariable},
 	translator::{cps::convert_program_to_cps, elaborator::elaborate_program, hoister::hoist_program},
 };
 
@@ -68,19 +70,7 @@ fn main() {
 
 		let now = Instant::now();
 
-		let interpreted_value = interpret_base(
-			elaborated_term.clone(),
-			BaseEnvironment::new(vec![(
-				BaseVariable::Name("add".to_owned()),
-				BaseValue::Function(Arc::new(|value_0| match value_0 {
-					BaseValue::Integer(x) => Some(BaseValue::Function(Arc::new(move |value_1| match value_1 {
-						BaseValue::Integer(y) => Some(BaseValue::Integer(x + y)),
-						_ => None,
-					}))),
-					_ => None,
-				})),
-			)]),
-		);
+		let interpreted_value = evaluate_base(elaborated_term.clone());
 
 		let elapsed = now.elapsed();
 
@@ -95,13 +85,13 @@ fn main() {
 
 		let now = Instant::now();
 
-		let cypress_value = cypress_term.clone().evaluate(symbol_generator.clone());
+		//let cypress_value = cypress_term.clone().evaluate(symbol_generator.clone());
 
 		let elapsed = now.elapsed();
 
 		println!("Elapsed (CPS): {:.2?}", elapsed);
 
-		println!("CPS-converted value: {:#?}", cypress_value);
+		//println!("CPS-converted value: {:#?}", cypress_value);
 
 		let firefly_program = hoist_program(cypress_term, &mut symbol_generator);
 

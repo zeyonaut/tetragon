@@ -7,4 +7,4 @@ fib :: {self @} {m Int} -> Int [
 		no  | [add2 (self [add2 (m, -1)], [self [add2 (m, -2)]])]
 	]
 ]
-fib 20
+fib 30
