@@ -30,8 +30,6 @@ mod translator;
 #[path = "utility/_.rs"]
 mod utility;
 
-use std::sync::Arc;
-
 use generator::*;
 use grammar::*;
 use parser::{

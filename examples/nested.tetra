@@ -4,7 +4,7 @@ a :: {x Int} -> Int [
 		r :: [add y 3]
 		c :: {z Int} -> Int [
 			s :: [add z 5]
-			add [add q r] s
+			add [add q [add q [add q r]]] [add s s]
 		]
 		c 4
 	]

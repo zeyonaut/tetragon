@@ -3,151 +3,117 @@ use std::collections::HashSet;
 use halfbrown::HashMap;
 
 use super::label::{Label, LabelGenerator};
-use crate::interpreter::{
-	cypress::{CypressOperation, CypressPrimitive, CypressTerm, CypressVariable},
-	firefly::{
-		FireflyOperation, FireflyPrimitive, FireflyProcedure, FireflyProgram, FireflyStatement, FireflyTerm, FireflyTerminator,
-		FireflyVariable,
+use crate::{
+	interpreter::{
+		cypress::{CypressOperation, CypressPrimitive, CypressProjection, CypressProjector, CypressTerm, CypressVariable},
+		firefly::{
+			BinaryOperator, FireflyOperand, FireflyOperation, FireflyPrimitive, FireflyProcedure, FireflyProgram,
+			FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator,
+		},
 	},
+	utility::ignore::Ignore,
 };
 
-fn substitute_in_variable(variable: CypressVariable, substitution: &HashMap<Label, Label>) -> CypressVariable {
-	match variable {
-		CypressVariable::Local(local) => CypressVariable::Local(substitution.get(&local).cloned().unwrap_or(local)),
-		other => other,
+struct Substitution(HashMap<Label, FireflyProjection>);
+
+trait Substitute {
+	fn apply(&mut self, substitution: &Substitution);
+
+	fn subbing(mut self, substitution: &Substitution) -> Self
+	where
+		Self: Sized,
+	{
+		self.apply(substitution);
+		self
 	}
 }
 
-pub fn substitute_in_operation(operation: CypressOperation, substitution: &HashMap<Label, Label>) -> CypressOperation {
-	match operation {
-		CypressOperation::EqualsQuery(xs) => CypressOperation::EqualsQuery(xs.map(|x| substitute_in_variable(x, substitution))),
-		CypressOperation::Projection(tuple, index) => {
-			CypressOperation::Projection(substitute_in_variable(tuple, substitution), index)
-		},
-		CypressOperation::Add(xs) => CypressOperation::Add(xs.map(|x| substitute_in_variable(x, substitution))),
-		CypressOperation::Pair(xs) => CypressOperation::Pair(
-			xs.into_vec()
-				.into_iter()
-				.map(|x| substitute_in_variable(x, substitution))
-				.collect::<Vec<_>>()
-				.into_boxed_slice(),
-		),
+impl Substitute for FireflyProjection {
+	fn apply(&mut self, substitution: &Substitution) {
+		if let CypressVariable::Local(local) = self.root {
+			if let Some(mut substituend) = substitution.0.get(&local).cloned() {
+				substituend.projectors.append(&mut self.projectors);
+				*self = substituend;
+			}
+		}
 	}
 }
 
-pub fn substitute(term: CypressTerm, mut substitution: HashMap<Label, Label>) -> CypressTerm {
-	match term {
-		CypressTerm::AssignValue {
-			binding,
-			ty,
-			value,
-			rest,
-		} => {
-			substitution.remove(&binding);
-			CypressTerm::AssignValue {
-				binding,
-				ty,
-				value,
-				rest: Box::new(substitute(*rest, substitution)),
-			}
-		},
-		CypressTerm::AssignOperation {
-			binding,
-			operation,
-			rest,
-		} => {
-			substitution.remove(&binding);
-			CypressTerm::AssignOperation {
-				binding,
-				operation: substitute_in_operation(operation, &substitution),
-				rest: Box::new(substitute(*rest, substitution)),
-			}
-		},
-		CypressTerm::DeclareFunction {
-			binding,
-			fixpoint_name,
-			domain,
-			codomain,
-			parameter,
-			body,
-			rest,
-		} => {
-			let mut body_substitution = substitution.clone();
-			if let Some(fixpoint_name) = fixpoint_name {
-				body_substitution.remove(&fixpoint_name);
-			}
-			body_substitution.remove(&parameter);
-			let body = substitute(*body, body_substitution);
-
-			let mut rest_substitution = substitution;
-			rest_substitution.remove(&binding);
-			let rest = substitute(*rest, rest_substitution);
-
-			CypressTerm::DeclareFunction {
-				binding,
-				fixpoint_name,
-				domain,
-				codomain,
-				parameter,
-				body: Box::new(body),
-				rest: Box::new(rest),
-			}
-		},
-		CypressTerm::DeclareContinuation {
-			label,
-			domain,
-			parameter,
-			body,
-			rest,
-		} => {
-			let mut body_substitution = substitution.clone();
-			body_substitution.remove(&parameter);
-			let body = substitute(*body, body_substitution);
-
-			let rest_substitution = substitution;
-			let rest = substitute(*rest, rest_substitution);
-
-			CypressTerm::DeclareContinuation {
-				label,
-				domain,
-				parameter,
-				body: Box::new(body),
-				rest: Box::new(rest),
-			}
-		},
-		CypressTerm::CaseSplit {
-			scrutinee,
-			yes_continuation,
-			no_continuation,
-		} => CypressTerm::CaseSplit {
-			scrutinee: substitute_in_variable(scrutinee, &substitution),
-			yes_continuation,
-			no_continuation,
-		},
-		CypressTerm::Apply {
-			function,
-			continuation,
-			argument,
-		} => CypressTerm::Apply {
-			function: substitute_in_variable(function, &substitution),
-			continuation,
-			argument: substitute_in_variable(argument, &substitution),
-		},
-		CypressTerm::Continue {
-			continuation_label,
-			argument,
-		} => CypressTerm::Continue {
-			continuation_label,
-			argument: substitute_in_variable(argument, &substitution),
-		},
-		CypressTerm::Halt { argument } => CypressTerm::Halt {
-			argument: substitute_in_variable(argument, &substitution),
-		},
+impl Substitute for FireflyOperand {
+	fn apply(&mut self, substitution: &Substitution) {
+		match self {
+			FireflyOperand::Copy(projection) => projection.apply(substitution),
+			FireflyOperand::Constant(_) => (),
+		}
 	}
 }
 
-fn get_if_local(variable: &CypressVariable) -> Option<Label> {
-	if let CypressVariable::Local(label) = variable {
+impl Substitute for FireflyOperation {
+	fn apply(&mut self, substitution: &Substitution) {
+		match self {
+			FireflyOperation::Id(operands) => operands.apply(substitution),
+			FireflyOperation::Binary(_, operands) => operands.iter_mut().map(|x| x.apply(substitution)).collect(),
+			FireflyOperation::Pair(operands) => operands.iter_mut().map(|x| x.apply(substitution)).collect(),
+			FireflyOperation::Closure(procedure, snapshot) => {
+				procedure.apply(substitution);
+				snapshot.iter_mut().map(|x| x.apply(substitution)).collect()
+			},
+		}
+	}
+}
+
+impl core::ops::Mul<Self> for Substitution {
+	type Output = Self;
+
+	fn mul(mut self, other: Self) -> Self::Output {
+		for substituend in self.0.values_mut() {
+			substituend.apply(&other)
+		}
+
+		for (replacee, substituend) in other.0 {
+			self.0.entry(replacee).or_insert(substituend);
+		}
+
+		self
+	}
+}
+
+impl Substitute for FireflyTerm {
+	fn apply(&mut self, substitution: &Substitution) {
+		for statement in &mut self.statements {
+			match statement {
+				FireflyStatement::Assign { binding: _, operation } => operation.apply(substitution),
+				// Because every parameter is fresh, we are not concerned about shadowing.
+				FireflyStatement::DeclareContinuation {
+					label: _,
+					parameter: _,
+					body,
+				} => body.apply(substitution),
+			}
+		}
+
+		match &mut self.terminator {
+			FireflyTerminator::Branch {
+				scrutinee,
+				yes_continuation: _,
+				no_continuation: _,
+			} => scrutinee.apply(substitution),
+			FireflyTerminator::Apply {
+				procedure,
+				snapshot,
+				continuation_label: _,
+				argument,
+			} => [procedure, snapshot, argument].map(|x| x.apply(substitution)).ignore(),
+			FireflyTerminator::Jump {
+				continuation_label: _,
+				argument,
+			} => argument.apply(substitution),
+		}
+	}
+}
+
+fn get_if_local(projection: &CypressProjection) -> Option<Label> {
+	if let CypressVariable::Local(label) = projection.root {
 		Some(label.clone())
 	} else {
 		None
@@ -156,8 +122,8 @@ fn get_if_local(variable: &CypressVariable) -> Option<Label> {
 
 pub fn compute_free_variables_in_operation(operation: &CypressOperation) -> HashSet<Label> {
 	match operation {
+		CypressOperation::Id(x) => [x].into_iter().filter_map(get_if_local).collect(),
 		CypressOperation::EqualsQuery(x) => x.into_iter().filter_map(get_if_local).collect(),
-		CypressOperation::Projection(tuple, _) => [tuple].into_iter().filter_map(get_if_local).collect(),
 		CypressOperation::Add(x) => x.into_iter().filter_map(get_if_local).collect(),
 		CypressOperation::Pair(vs) => (*vs).into_iter().filter_map(get_if_local).collect(),
 	}
@@ -229,14 +195,19 @@ pub fn compute_free_variables_in_term(term: &CypressTerm) -> HashSet<Label> {
 			continuation_label: _,
 			argument,
 		} => [argument].into_iter().filter_map(get_if_local).collect(),
-		CypressTerm::Halt { argument } => [argument].into_iter().filter_map(get_if_local).collect(),
 	}
 }
 
-pub fn hoist_variable(variable: CypressVariable) -> FireflyVariable {
-	match variable {
-		CypressVariable::Local(x) => FireflyVariable::Local(x),
-		CypressVariable::Name(y) => FireflyVariable::Global(y),
+pub fn hoist_projection(projection: CypressProjection) -> FireflyProjection {
+	FireflyProjection {
+		root: projection.root,
+		projectors: projection
+			.projectors
+			.into_iter()
+			.map(|x| match x {
+				CypressProjector::Field(x) => FireflyProjector::Field(x),
+			})
+			.collect(),
 	}
 }
 
@@ -250,13 +221,18 @@ pub fn hoist_primitive(value: CypressPrimitive) -> FireflyPrimitive {
 
 pub fn hoist_operation(operation: CypressOperation) -> FireflyOperation {
 	match operation {
-		CypressOperation::EqualsQuery(x) => FireflyOperation::EqualsQuery(x.map(hoist_variable)),
-		CypressOperation::Projection(tuple, index) => FireflyOperation::Projection(hoist_variable(tuple), index),
-		CypressOperation::Add(x) => FireflyOperation::Add(x.map(hoist_variable)),
+		CypressOperation::Id(x) => FireflyOperation::Id(FireflyOperand::Copy(hoist_projection(x))),
+		CypressOperation::EqualsQuery(x) => FireflyOperation::Binary(
+			BinaryOperator::EqualsQuery,
+			x.map(|x| FireflyOperand::Copy(hoist_projection(x))),
+		),
+		CypressOperation::Add(x) => {
+			FireflyOperation::Binary(BinaryOperator::Add, x.map(|x| FireflyOperand::Copy(hoist_projection(x))))
+		},
 		CypressOperation::Pair(x) => FireflyOperation::Pair(
 			x.into_vec()
 				.into_iter()
-				.map(hoist_variable)
+				.map(|x| FireflyOperand::Copy(hoist_projection(x)))
 				.collect::<Vec<_>>()
 				.into_boxed_slice(),
 		),
@@ -276,9 +252,9 @@ pub fn hoist_term(
 			rest,
 		} => {
 			let mut rest = hoist_term(*rest, procedures, symbol_generator);
-			rest.statements.push(FireflyStatement::AssignPrimitive {
+			rest.statements.push(FireflyStatement::Assign {
 				binding,
-				value: hoist_primitive(value),
+				operation: FireflyOperation::Id(FireflyOperand::Constant(hoist_primitive(value))),
 			});
 			rest
 		},
@@ -288,7 +264,7 @@ pub fn hoist_term(
 			rest,
 		} => {
 			let mut rest = hoist_term(*rest, procedures, symbol_generator);
-			rest.statements.push(FireflyStatement::AssignOperation {
+			rest.statements.push(FireflyStatement::Assign {
 				binding,
 				operation: hoist_operation(operation),
 			});
@@ -303,67 +279,83 @@ pub fn hoist_term(
 			body,
 			rest,
 		} => {
-			let mut body_free_variables = compute_free_variables_in_term(&body);
-			body_free_variables.remove(&parameter);
-			fixpoint_name.map(|fixpoint_name| body_free_variables.remove(&fixpoint_name));
+			let [procedure_label, environment] = symbol_generator.fresh();
 
-			let environment_arguments_to_parameters = body_free_variables
-				.iter()
-				.cloned()
-				.map(|environment_argument| {
-					let [environment_parameter] = symbol_generator.fresh();
-					(environment_argument, environment_parameter)
-				})
-				.collect::<HashMap<_, _>>();
-
-			let body = substitute(*body, environment_arguments_to_parameters.clone());
-			let mut body = hoist_term(body, procedures, symbol_generator);
-
-			let environment_parameters_to_arguments = environment_arguments_to_parameters
-				.into_iter()
-				.map(|(environment_argument, environment_parameter)| (environment_parameter, environment_argument))
-				.collect::<HashMap<_, _>>();
-
-			let environment_parameters = environment_parameters_to_arguments
-				.iter()
-				.map(|(environment_parameter, _)| environment_parameter)
-				.cloned()
-				.collect::<HashSet<_>>();
-
-			let [procedure_label] = symbol_generator.fresh();
-
-			if let Some(fixpoint_name) = fixpoint_name {
-				body.statements.push(FireflyStatement::AssignClosure {
-					binding: fixpoint_name,
-					procedure: procedure_label,
-					environment_parameters_to_arguments: environment_parameters
-						.iter()
-						.cloned()
-						.map(|parameter| (parameter, parameter))
-						.collect::<HashMap<_, _>>(),
-				});
-			}
-
-			// TODO: Surround hoisted body term with let bindings that unpack the locals from the environment. (or do we want to do this at a later stage, such as when translating to Sierra?)
-
-			let procedure = FireflyProcedure {
-				fixpoint_variable: fixpoint_name,
-				environment_parameters,
-				parameter,
-				body,
+			let free_variables = {
+				let mut free_variables = compute_free_variables_in_term(&body);
+				free_variables.remove(&parameter);
+				if let Some(fixpoint_name) = fixpoint_name {
+					free_variables.remove(&fixpoint_name);
+				}
+				free_variables.into_iter().collect::<Vec<_>>()
 			};
 
-			procedures.insert(procedure_label, procedure);
+			// Generate a procedure.
+			{
+				let substitution = Substitution(
+					free_variables
+						.iter()
+						.cloned()
+						.enumerate()
+						.map(|(i, variable)| {
+							(
+								variable,
+								FireflyProjection::new(CypressVariable::Local(environment)).project(FireflyProjector::Free(i)),
+							)
+						})
+						.collect::<HashMap<_, _>>(),
+				);
 
-			let mut rest = hoist_term(*rest, procedures, symbol_generator);
+				let mut body = hoist_term(*body, procedures, symbol_generator).subbing(&substitution);
 
-			rest.statements.push(FireflyStatement::AssignClosure {
-				binding,
-				procedure: procedure_label,
-				environment_parameters_to_arguments,
-			});
+				if let Some(fixpoint_name) = fixpoint_name {
+					body.statements.push(FireflyStatement::Assign {
+						binding: fixpoint_name,
+						operation: FireflyOperation::Closure(
+							FireflyOperand::Constant(FireflyPrimitive::Procedure(procedure_label)),
+							(0..free_variables.len())
+								.map(|i| {
+									FireflyOperand::Copy(
+										FireflyProjection::new(CypressVariable::Local(environment))
+											.project(FireflyProjector::Free(i)),
+									)
+								})
+								.collect::<Vec<_>>()
+								.into_boxed_slice(),
+						),
+					});
+				}
 
-			rest
+				procedures.insert(
+					procedure_label,
+					FireflyProcedure {
+						environment: Some(environment),
+						parameter: Some(parameter),
+						body,
+					},
+				);
+			}
+
+			// Generate and return a closure assignment.
+			{
+				let captures = free_variables
+					.into_iter()
+					.map(|variable| FireflyOperand::Copy(FireflyProjection::new(CypressVariable::Local(variable))))
+					.collect::<Vec<_>>()
+					.into_boxed_slice();
+
+				let mut rest = hoist_term(*rest, procedures, symbol_generator);
+
+				rest.statements.push(FireflyStatement::Assign {
+					binding,
+					operation: FireflyOperation::Closure(
+						FireflyOperand::Constant(FireflyPrimitive::Procedure(procedure_label)),
+						captures,
+					),
+				});
+
+				rest
+			}
 		},
 		CypressTerm::DeclareContinuation {
 			label,
@@ -385,7 +377,7 @@ pub fn hoist_term(
 			yes_continuation,
 			no_continuation,
 		} => FireflyTerm::new(FireflyTerminator::Branch {
-			scrutinee: hoist_variable(scrutinee),
+			scrutinee: FireflyOperand::Copy(hoist_projection(scrutinee)),
 			yes_continuation: yes_continuation,
 			no_continuation: no_continuation,
 		}),
@@ -393,20 +385,21 @@ pub fn hoist_term(
 			function,
 			continuation,
 			argument,
-		} => FireflyTerm::new(FireflyTerminator::Apply {
-			closure: hoist_variable(function),
-			continuation_label: continuation,
-			argument: hoist_variable(argument),
-		}),
+		} => {
+			let function_projection = hoist_projection(function);
+			FireflyTerm::new(FireflyTerminator::Apply {
+				procedure: FireflyOperand::Copy(function_projection.clone().project(FireflyProjector::Procedure)),
+				snapshot: FireflyOperand::Copy(function_projection.project(FireflyProjector::Snapshot)),
+				continuation_label: continuation,
+				argument: FireflyOperand::Copy(hoist_projection(argument)),
+			})
+		},
 		CypressTerm::Continue {
 			continuation_label,
 			argument,
 		} => FireflyTerm::new(FireflyTerminator::Jump {
 			continuation_label,
-			argument: hoist_variable(argument),
-		}),
-		CypressTerm::Halt { argument } => FireflyTerm::new(FireflyTerminator::Halt {
-			argument: hoist_variable(argument),
+			argument: FireflyOperand::Copy(hoist_projection(argument)),
 		}),
 	}
 }
@@ -416,7 +409,17 @@ pub fn hoist_term(
 pub fn hoist_program(term: CypressTerm, symbol_generator: &mut LabelGenerator) -> FireflyProgram {
 	let mut procedures = HashMap::<Label, FireflyProcedure>::new();
 
-	let entry = hoist_term(term, &mut procedures, symbol_generator);
+	let entry_body = hoist_term(term, &mut procedures, symbol_generator);
+
+	let [entry] = symbol_generator.fresh();
+	procedures.insert(
+		entry,
+		FireflyProcedure {
+			environment: None,
+			parameter: None,
+			body: entry_body,
+		},
+	);
 
 	FireflyProgram {
 		procedures,
