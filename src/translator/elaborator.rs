@@ -37,7 +37,6 @@ impl Context {
 	}
 }
 
-// TODO: Should this be a part of elaboration? That would required types in the context. I think something like that is necessary for user-defined types.
 pub fn elaborate_ty(parsed_ty: ParsedType) -> Option<BaseType> {
 	match parsed_ty {
 		ParsedType::Name(_) => unimplemented!(),
@@ -57,8 +56,6 @@ pub fn elaborate_ty(parsed_ty: ParsedType) -> Option<BaseType> {
 	}
 }
 
-// TODO: This needs to get cleaned up as it's really messy (in particular: completely different styles in each branch, no error handling with Result).
-// TODO: Maybe make elaborated expressions a little less 'elaborate' by keeping types easily computable but not necessarily directly stored.
 pub fn elaborate_term(
 	context: Context,
 	parsed_term: ParsedTerm,
