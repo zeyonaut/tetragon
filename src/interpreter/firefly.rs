@@ -1,4 +1,4 @@
-use std::{hash::Hash};
+use std::hash::Hash;
 
 use halfbrown::HashMap;
 
@@ -47,8 +47,10 @@ pub enum FireflyType {
 	Unity,
 	Polarity,
 	Integer,
-	Power { domain: Box<Self>, codomain: Box<Self> },
-	Product(Vec<Self>),
+	Product(Slice<Self>),
+	Procedure,
+	Snapshot,
+	Closure,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +59,7 @@ pub enum FireflyValue {
 	Polarity(bool),
 	Integer(i64),
 	Procedure(Label),
-	Tuple(Vec<Self>),
+	Tuple(Slice<Self>),
 	Snapshot(Slice<Self>),
 	Closure(Box<Self>, Slice<Self>),
 }
@@ -90,7 +92,7 @@ pub enum BinaryOperator {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FireflyOperation {
-	Id(FireflyOperand),
+	Id(FireflyType, FireflyOperand),
 	Binary(BinaryOperator, [FireflyOperand; 2]),
 	Pair(Slice<FireflyOperand>),
 	Closure(FireflyOperand, Slice<FireflyOperand>),
@@ -104,16 +106,15 @@ impl FireflyOperation {
 	) -> Option<FireflyValue> {
 		use FireflyValue::*;
 		match self {
-			FireflyOperation::Id(operand) => lookup_operand(intrinsics, variables, operand),
+			FireflyOperation::Id(ty, operand) => compute(intrinsics, variables, operand),
 			FireflyOperation::Binary(operator, [x, y]) => match operator {
 				BinaryOperator::EqualsQuery => Some(Polarity(
-					lookup_operand(intrinsics, variables, x)? == lookup_operand(intrinsics, variables, y)?,
+					compute(intrinsics, variables, x)? == compute(intrinsics, variables, y)?,
 				)),
 				BinaryOperator::Add => {
-					if let (Some(Integer(x)), Some(Integer(y))) = (
-						lookup_operand(intrinsics, variables, x),
-						lookup_operand(intrinsics, variables, y),
-					) {
+					if let (Some(Integer(x)), Some(Integer(y))) =
+						(compute(intrinsics, variables, x), compute(intrinsics, variables, y))
+					{
 						Some(Integer(x + y))
 					} else {
 						None
@@ -122,16 +123,16 @@ impl FireflyOperation {
 			},
 			FireflyOperation::Pair(parts) => Some(Tuple(
 				parts
-					.as_ref()
-					.into_iter()
-					.map(|variable| lookup_operand(intrinsics, variables, variable))
-					.collect::<Option<Vec<_>>>()?,
+					.iter()
+					.map(|variable| compute(intrinsics, variables, variable))
+					.collect::<Option<Vec<_>>>()?
+					.into_boxed_slice(),
 			)),
 			FireflyOperation::Closure(procedure, snapshot_operands) => {
-				let procedure = lookup_operand(intrinsics, variables, procedure)?;
+				let procedure = compute(intrinsics, variables, procedure)?;
 				let snapshot_operands = snapshot_operands
 					.into_iter()
-					.map(|operand| Some(lookup_operand(intrinsics, variables, operand)?))
+					.map(|operand| Some(compute(intrinsics, variables, operand)?))
 					.collect::<Option<Vec<_>>>()?
 					.into_boxed_slice();
 
@@ -150,6 +151,7 @@ pub enum FireflyStatement {
 	DeclareContinuation {
 		label: Label,
 		parameter: Label,
+		domain: FireflyType,
 		body: FireflyTerm,
 	},
 }
@@ -205,7 +207,7 @@ struct FireflyContinuation<'a> {
 	body: &'a FireflyTerm,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FireflyProgram {
 	pub procedures: HashMap<Label, FireflyProcedure>,
 	pub entry: Label,
@@ -225,7 +227,12 @@ impl FireflyProgram {
 					FireflyStatement::Assign { binding, operation } => {
 						environment.insert(binding.clone(), operation.evaluate(&intrinsics, &environment)?);
 					},
-					FireflyStatement::DeclareContinuation { label, parameter, body } => {
+					FireflyStatement::DeclareContinuation {
+						label,
+						parameter,
+						domain: _,
+						body,
+					} => {
 						continuations.entry(label.clone()).or_insert_with(|| FireflyContinuation {
 							parameter: parameter.clone(),
 							body,
@@ -240,7 +247,7 @@ impl FireflyProgram {
 					yes_continuation,
 					no_continuation,
 				} => {
-					if let FireflyValue::Polarity(scrutinee) = lookup_operand(&intrinsics, &environment, scrutinee)? {
+					if let FireflyValue::Polarity(scrutinee) = compute(&intrinsics, &environment, scrutinee)? {
 						let continuation_label = if scrutinee { yes_continuation } else { no_continuation };
 
 						let continuation = continuations.get(&continuation_label)?;
@@ -256,8 +263,8 @@ impl FireflyProgram {
 					continuation_label,
 					argument,
 				} => {
-					let procedure = compute(&intrinsics, &environment, procedure.clone())?;
-					let snapshot = compute(&intrinsics, &environment, snapshot.clone())?;
+					let procedure = compute(&intrinsics, &environment, procedure)?;
+					let snapshot = compute(&intrinsics, &environment, snapshot)?;
 					if let FireflyValue::Procedure(procedure_label) = procedure {
 						let procedure = self.procedures.get(&procedure_label)?;
 
@@ -265,7 +272,7 @@ impl FireflyProgram {
 							return_stack.push((continuation_label.clone(), environment.clone()));
 						}
 
-						let argument = lookup_operand(&intrinsics, &environment, argument)?;
+						let argument = compute(&intrinsics, &environment, argument)?;
 
 						environment = HashMap::new();
 						if let Some(shadow) = procedure.environment {
@@ -286,16 +293,15 @@ impl FireflyProgram {
 				} => {
 					if let Some(label) = continuation_label {
 						let continuation = continuations.get(&label).cloned()?;
-						environment.insert(continuation.parameter, lookup_operand(&intrinsics, &environment, argument)?);
+						environment.insert(continuation.parameter, compute(&intrinsics, &environment, argument)?);
 						continuation.body
 					} else if let Some((returner_label, mut returner_environment)) = return_stack.pop() {
 						let continuation = continuations.get(&returner_label).cloned()?;
-						returner_environment
-							.insert(continuation.parameter, lookup_operand(&intrinsics, &environment, argument)?);
+						returner_environment.insert(continuation.parameter, compute(&intrinsics, &environment, argument)?);
 						environment = returner_environment;
 						continuation.body
 					} else {
-						return lookup_operand(&intrinsics, &environment, argument);
+						return compute(&intrinsics, &environment, argument);
 					}
 				},
 			}
@@ -406,17 +412,6 @@ impl FireflyProgram {
 	}
 }
 
-fn lookup_operand(
-	intrinsics: &HashMap<String, FireflyValue>,
-	environment: &HashMap<Label, FireflyValue>,
-	operand: &FireflyOperand,
-) -> Option<FireflyValue> {
-	match operand {
-		FireflyOperand::Copy(projection) => lookup(intrinsics, environment, projection),
-		FireflyOperand::Constant(primitive) => Some(primitive.evaluate()),
-	}
-}
-
 fn lookup(
 	intrinsics: &HashMap<String, FireflyValue>,
 	environment: &HashMap<Label, FireflyValue>,
@@ -470,10 +465,10 @@ fn lookup(
 fn compute(
 	intrinsics: &HashMap<String, FireflyValue>,
 	environment: &HashMap<Label, FireflyValue>,
-	operand: FireflyOperand,
+	operand: &FireflyOperand,
 ) -> Option<FireflyValue> {
 	match operand {
-		FireflyOperand::Copy(copy) => lookup(intrinsics, environment, &copy),
-		FireflyOperand::Constant(value) => Some(value.evaluate()),
+		FireflyOperand::Copy(projection) => lookup(intrinsics, environment, &projection),
+		FireflyOperand::Constant(primitive) => Some(primitive.evaluate()),
 	}
 }

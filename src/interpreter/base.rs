@@ -89,8 +89,6 @@ impl BaseTerm {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BaseType {
-	//	Zero,
-	//	One,
 	Polarity,
 	Integer,
 	Product(Vec<Self>),

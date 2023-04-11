@@ -1,9 +1,6 @@
 use std::{collections::HashMap, hash::Hash, sync::Arc};
 
-use crate::{
-	translator::label::{Label},
-	utility::slice::Slice,
-};
+use crate::{translator::label::Label, utility::slice::Slice};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum CypressVariable {
@@ -42,16 +39,7 @@ pub enum CypressType {
 	Polarity,
 	Integer,
 	Power { domain: Box<Self>, codomain: Box<Self> },
-	Product(Vec<Self>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CypressValue {
-	Unity,
-	Polarity(bool),
-	Integer(i64),
-	Tuple(Vec<Self>),
-	Function(Arc<CypressFunction>),
+	Product(Slice<Self>),
 }
 
 // Primitives are essentially nullary operations that can't fail.
@@ -64,7 +52,7 @@ pub enum CypressPrimitive {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CypressOperation {
-	Id(CypressProjection),
+	Id(CypressType, CypressProjection),
 	EqualsQuery([CypressProjection; 2]),
 	Add([CypressProjection; 2]),
 	Pair(Slice<CypressProjection>),
@@ -113,21 +101,4 @@ pub enum CypressTerm {
 		continuation_label: Option<Label>,
 		argument: CypressProjection,
 	},
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CypressFunction {
-	pub identifier: CypressVariable,
-	pub fixpoint_variable: Option<Label>,
-	pub parameter: Label,
-	pub body: CypressTerm,
-	pub variables: HashMap<CypressVariable, CypressValue>,
-}
-
-#[derive(Clone, Debug)]
-struct CypressContinuation {
-	parameter: Label,
-	body: CypressTerm,
-	variables: HashMap<CypressVariable, CypressValue>,
-	continuations: HashMap<Label, Arc<CypressContinuation>>,
 }

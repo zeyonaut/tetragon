@@ -77,7 +77,7 @@ pub fn convert_expression_to_cps(
 				}),
 			))
 		},
-		BaseTerm::Projection { ty: _, tuple, index } => {
+		BaseTerm::Projection { ty, tuple, index } => {
 			let [binding] = symbol_generator.fresh();
 
 			let (tuple_variable, tuple_context) = convert_expression_to_cps(*tuple, symbol_generator)?;
@@ -87,7 +87,10 @@ pub fn convert_expression_to_cps(
 				Box::new(move |body| {
 					tuple_context(CypressTerm::AssignOperation {
 						binding,
-						operation: CypressOperation::Id(tuple_variable.project(CypressProjector::Field(index))),
+						operation: CypressOperation::Id(
+							convert_type_to_cps(ty),
+							tuple_variable.project(CypressProjector::Field(index)),
+						),
 						rest: Box::new(body),
 					})
 				}),
@@ -302,14 +305,17 @@ pub fn convert_tail_expression_to_cps(
 				},
 			))
 		},
-		BaseTerm::Projection { ty: _, tuple, index } => {
+		BaseTerm::Projection { ty, tuple, index } => {
 			let [binding] = symbol_generator.fresh();
 
 			let (tuple_variable, tuple_context) = convert_expression_to_cps(*tuple, symbol_generator)?;
 
 			Some(tuple_context(CypressTerm::AssignOperation {
 				binding,
-				operation: CypressOperation::Id(tuple_variable.project(CypressProjector::Field(index))),
+				operation: CypressOperation::Id(
+					convert_type_to_cps(ty),
+					tuple_variable.project(CypressProjector::Field(index)),
+				),
 				rest: Box::new(CypressTerm::Continue {
 					continuation_label,
 					argument: CypressProjection::new(CypressVariable::Local(binding)),

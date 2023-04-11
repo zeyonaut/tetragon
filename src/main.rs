@@ -41,13 +41,15 @@ use utility::*;
 
 use crate::{
 	interpreter::base::{evaluate_base, interpret_base, BaseEnvironment, BaseValue, BaseVariable},
-	translator::{cps::convert_program_to_cps, elaborator::elaborate_program, hoister::hoist_program},
+	translator::{cps::convert_program_to_cps, elaborator::elaborate_program, hoister::hoist_program, nasm_win64},
 };
 
 fn main() {
 	let args = std::env::args().collect::<Vec<_>>();
 
 	let file_path = args.get(1).expect("Expected file path as first argument.");
+
+	let output_path = args.get(2);
 
 	let file_contents = std::fs::read_to_string(file_path).expect("Could not read specified file.");
 
@@ -97,12 +99,18 @@ fn main() {
 
 		let now = Instant::now();
 
-		let firefly_value = firefly_program.evaluate();
+		let firefly_value = firefly_program.clone().evaluate();
 
 		let elapsed = now.elapsed();
 
 		println!("Elapsed (Firefly): {:#?}", elapsed);
 		println!("Firefly value: {:#?}", firefly_value);
+
+		let program = nasm_win64::emit_program(firefly_program).map(nasm_win64::emit_assembly);
+
+		if let Some(program) = program {
+			std::fs::write(output_path.expect("expected output argument"), program).expect("failed to write output");
+		}
 	} else {
 		panic!("Not a term");
 	}

@@ -5,10 +5,12 @@ use halfbrown::HashMap;
 use super::label::{Label, LabelGenerator};
 use crate::{
 	interpreter::{
-		cypress::{CypressOperation, CypressPrimitive, CypressProjection, CypressProjector, CypressTerm, CypressVariable},
+		cypress::{
+			CypressOperation, CypressPrimitive, CypressProjection, CypressProjector, CypressTerm, CypressType, CypressVariable,
+		},
 		firefly::{
 			BinaryOperator, FireflyOperand, FireflyOperation, FireflyPrimitive, FireflyProcedure, FireflyProgram,
-			FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator,
+			FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyType,
 		},
 	},
 	utility::ignore::Ignore,
@@ -51,7 +53,7 @@ impl Substitute for FireflyOperand {
 impl Substitute for FireflyOperation {
 	fn apply(&mut self, substitution: &Substitution) {
 		match self {
-			FireflyOperation::Id(operands) => operands.apply(substitution),
+			FireflyOperation::Id(_, operands) => operands.apply(substitution),
 			FireflyOperation::Binary(_, operands) => operands.iter_mut().map(|x| x.apply(substitution)).collect(),
 			FireflyOperation::Pair(operands) => operands.iter_mut().map(|x| x.apply(substitution)).collect(),
 			FireflyOperation::Closure(procedure, snapshot) => {
@@ -87,6 +89,7 @@ impl Substitute for FireflyTerm {
 				FireflyStatement::DeclareContinuation {
 					label: _,
 					parameter: _,
+					domain: _,
 					body,
 				} => body.apply(substitution),
 			}
@@ -122,7 +125,7 @@ fn get_if_local(projection: &CypressProjection) -> Option<Label> {
 
 pub fn compute_free_variables_in_operation(operation: &CypressOperation) -> HashSet<Label> {
 	match operation {
-		CypressOperation::Id(x) => [x].into_iter().filter_map(get_if_local).collect(),
+		CypressOperation::Id(_, x) => [x].into_iter().filter_map(get_if_local).collect(),
 		CypressOperation::EqualsQuery(x) => x.into_iter().filter_map(get_if_local).collect(),
 		CypressOperation::Add(x) => x.into_iter().filter_map(get_if_local).collect(),
 		CypressOperation::Pair(vs) => (*vs).into_iter().filter_map(get_if_local).collect(),
@@ -221,7 +224,7 @@ pub fn hoist_primitive(value: CypressPrimitive) -> FireflyPrimitive {
 
 pub fn hoist_operation(operation: CypressOperation) -> FireflyOperation {
 	match operation {
-		CypressOperation::Id(x) => FireflyOperation::Id(FireflyOperand::Copy(hoist_projection(x))),
+		CypressOperation::Id(ty, x) => FireflyOperation::Id(hoist_ty(ty), FireflyOperand::Copy(hoist_projection(x))),
 		CypressOperation::EqualsQuery(x) => FireflyOperation::Binary(
 			BinaryOperator::EqualsQuery,
 			x.map(|x| FireflyOperand::Copy(hoist_projection(x))),
@@ -239,6 +242,23 @@ pub fn hoist_operation(operation: CypressOperation) -> FireflyOperation {
 	}
 }
 
+pub fn hoist_ty(ty: CypressType) -> FireflyType {
+	match ty {
+		CypressType::Unity => FireflyType::Unity,
+		CypressType::Polarity => FireflyType::Polarity,
+		CypressType::Integer => FireflyType::Integer,
+		CypressType::Power { domain, codomain } => FireflyType::Closure,
+		CypressType::Product(factors) => FireflyType::Product(
+			factors
+				.into_vec()
+				.into_iter()
+				.map(hoist_ty)
+				.collect::<Vec<_>>()
+				.into_boxed_slice(),
+		),
+	}
+}
+
 pub fn hoist_term(
 	term: CypressTerm,
 	procedures: &mut HashMap<Label, FireflyProcedure>,
@@ -247,14 +267,14 @@ pub fn hoist_term(
 	match term {
 		CypressTerm::AssignValue {
 			binding,
-			ty: _,
+			ty,
 			value,
 			rest,
 		} => {
 			let mut rest = hoist_term(*rest, procedures, symbol_generator);
 			rest.statements.push(FireflyStatement::Assign {
 				binding,
-				operation: FireflyOperation::Id(FireflyOperand::Constant(hoist_primitive(value))),
+				operation: FireflyOperation::Id(hoist_ty(ty), FireflyOperand::Constant(hoist_primitive(value))),
 			});
 			rest
 		},
@@ -359,7 +379,7 @@ pub fn hoist_term(
 		},
 		CypressTerm::DeclareContinuation {
 			label,
-			domain: _,
+			domain,
 			parameter,
 			body,
 			rest,
@@ -368,6 +388,7 @@ pub fn hoist_term(
 			rest.statements.push(FireflyStatement::DeclareContinuation {
 				label,
 				parameter,
+				domain: hoist_ty(domain),
 				body: hoist_term(*body, procedures, symbol_generator),
 			});
 			rest
