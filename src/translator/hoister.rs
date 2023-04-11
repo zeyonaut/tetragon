@@ -55,7 +55,7 @@ impl Substitute for FireflyOperation {
 		match self {
 			FireflyOperation::Id(_, operands) => operands.apply(substitution),
 			FireflyOperation::Binary(_, operands) => operands.iter_mut().map(|x| x.apply(substitution)).collect(),
-			FireflyOperation::Pair(operands) => operands.iter_mut().map(|x| x.apply(substitution)).collect(),
+			FireflyOperation::Pair(operands) => operands.iter_mut().map(|(_, operand)| operand.apply(substitution)).collect(),
 			FireflyOperation::Closure(procedure, snapshot) => {
 				procedure.apply(substitution);
 				snapshot.iter_mut().map(|x| x.apply(substitution)).collect()
@@ -128,7 +128,10 @@ pub fn compute_free_variables_in_operation(operation: &CypressOperation) -> Hash
 		CypressOperation::Id(_, x) => [x].into_iter().filter_map(get_if_local).collect(),
 		CypressOperation::EqualsQuery(x) => x.into_iter().filter_map(get_if_local).collect(),
 		CypressOperation::Add(x) => x.into_iter().filter_map(get_if_local).collect(),
-		CypressOperation::Pair(vs) => (*vs).into_iter().filter_map(get_if_local).collect(),
+		CypressOperation::Pair(vs) => (*vs)
+			.into_iter()
+			.filter_map(|(ty, projection)| get_if_local(projection))
+			.collect(),
 	}
 }
 
@@ -235,7 +238,7 @@ pub fn hoist_operation(operation: CypressOperation) -> FireflyOperation {
 		CypressOperation::Pair(x) => FireflyOperation::Pair(
 			x.into_vec()
 				.into_iter()
-				.map(|x| FireflyOperand::Copy(hoist_projection(x)))
+				.map(|(ty, projection)| (hoist_ty(ty), FireflyOperand::Copy(hoist_projection(projection))))
 				.collect::<Vec<_>>()
 				.into_boxed_slice(),
 		),

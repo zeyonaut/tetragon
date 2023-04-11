@@ -55,7 +55,7 @@ pub enum CypressOperation {
 	Id(CypressType, CypressProjection),
 	EqualsQuery([CypressProjection; 2]),
 	Add([CypressProjection; 2]),
-	Pair(Slice<CypressProjection>),
+	Pair(Slice<(CypressType, CypressProjection)>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

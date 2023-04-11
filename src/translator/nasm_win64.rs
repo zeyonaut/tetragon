@@ -1,12 +1,15 @@
 use halfbrown::HashMap;
 
 use super::label::Label;
-use crate::interpreter::{
-	cypress::CypressVariable,
-	firefly::{
-		BinaryOperator, FireflyOperand, FireflyOperation, FireflyPrimitive, FireflyProcedure, FireflyProgram,
-		FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyType,
+use crate::{
+	interpreter::{
+		cypress::CypressVariable,
+		firefly::{
+			BinaryOperator, FireflyOperand, FireflyOperation, FireflyPrimitive, FireflyProcedure, FireflyProgram,
+			FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyType,
+		},
 	},
+	utility::slice::slice,
 };
 
 pub enum NASMDefinition {
@@ -24,6 +27,8 @@ pub enum NASMRegister64 {
 	R11, // Temporary
 	RSP,
 	RBP,
+	RSI,
+	RDI,
 }
 
 impl ToString for NASMRegister64 {
@@ -39,6 +44,8 @@ impl ToString for NASMRegister64 {
 			R11 => "r11",
 			RSP => "rsp",
 			RBP => "rbp",
+			RSI => "rsi",
+			RDI => "rdi",
 		}
 		.to_owned()
 	}
@@ -60,6 +67,7 @@ pub enum NASMInstruction {
 	MovFromI64(NASMRegister64, i64),
 	MovFromRBPMinus(NASMRegister64, u32),
 	MovIntoRBPMinus(u32, NASMRegister64),
+	RepMovsb,
 	CallLabel(String),
 	Leave,
 	Ret,
@@ -83,6 +91,7 @@ impl NASMInstruction {
 			MovFromI64(reg, imm) => format!("mov {}, {imm}", reg.to_string()),
 			MovFromRBPMinus(reg, offset) => format!("mov {}, [rbp - {offset}]", reg.to_string()),
 			MovIntoRBPMinus(offset, reg) => format!("mov [rbp - {offset}], {}", reg.to_string()),
+			RepMovsb => format!("rep movsb"),
 			CallLabel(label) => format!("call {label}"),
 			Leave => format!("leave"),
 			Ret => format!("ret"),
@@ -136,22 +145,48 @@ impl StackFrame {
 		self.label_to_offset_from_frame_pointer.get(&label).cloned()
 	}
 
-	pub fn get_field(&self, projection: &FireflyProjection) -> Option<u32> {
+	pub fn get_field(&self, projection: &FireflyProjection) -> Option<(FireflyType, u32)> {
 		match projection.root {
 			CypressVariable::Local(local) => {
-				let (ty, mut offset) = self.get(&local)?;
+				let (mut ty, mut offset) = self.get(&local)?;
 
-				// TODO: handle projections with awareness of types.
 				for projector in &projection.projectors {
 					match projector {
-						FireflyProjector::Field(i) => offset += (8 * i) as u32,
-						FireflyProjector::Free(i) => offset += (8 * i) as u32,
-						FireflyProjector::Procedure => (),
-						FireflyProjector::Snapshot => offset += 8,
+						FireflyProjector::Field(i) => {
+							if let FireflyType::Product(factors) = ty {
+								ty = factors.get(*i)?.clone();
+								offset -= factors.iter().take(*i).fold(0, |acc, ty| acc + size_of_ty(ty));
+							} else {
+								return None;
+							}
+						},
+						FireflyProjector::Free(i) => {
+							if let FireflyType::Snapshot(factors) = ty {
+								ty = factors.get(*i)?.clone();
+								offset -= factors.iter().take(*i).fold(0, |acc, ty| acc + size_of_ty(ty));
+							} else {
+								return None;
+							}
+						},
+						FireflyProjector::Procedure => {
+							if let FireflyType::Closure = ty {
+								ty = FireflyType::Procedure;
+							} else {
+								return None;
+							}
+						},
+						FireflyProjector::Snapshot => {
+							if let FireflyType::Closure = ty {
+								ty = FireflyType::Snapshot(slice![]);
+								offset += 8;
+							} else {
+								return None;
+							}
+						},
 					}
 				}
 
-				Some(offset)
+				Some((ty, offset))
 			},
 			_ => None, // TODO: This would need a different return type, and wouldn't be relative to the frame pointer.
 		}
@@ -263,7 +298,8 @@ pub fn emit_procedure(label: Label, procedure: &FireflyProcedure) -> Option<NASM
 
 	let stack_size = stack_frame.size();
 	let stack_shadow = 32;
-	let stack_padding = 16 - ((stack_size + 8) % 16) % 16;
+	let stack_padding = (16 - ((stack_size + 8) % 16)) % 16;
+	println!("{stack_padding}");
 
 	let prologue = Vec::from([
 		PushReg(RBP),
@@ -294,7 +330,7 @@ pub fn emit_term(
 	use NASMRegister64::*;
 	let mut instructions = Vec::new();
 
-	for statement in &term.statements {
+	for statement in term.statements.iter().rev() {
 		emit_statement(block_stack, statement, &mut instructions, stack_frame)
 	}
 
@@ -321,13 +357,25 @@ pub fn emit_statement(
 				let var = stack_frame.allocate(binding.clone(), ty.clone());
 				match operand {
 					FireflyOperand::Copy(projection) => {
-						instructions.push(MovFromRBPMinus(
-							RAX,
-							stack_frame
-								.get_field(projection)
-								.expect("failed to get field from stack frame"),
-						));
-						instructions.push(MovIntoRBPMinus(var, RAX));
+						let (ty, offset) = stack_frame
+							.get_field(projection)
+							.expect("failed to get field from stack frame");
+						let size = size_of_ty(&ty);
+						if size == 0 {
+							()
+						} else if size == 8 {
+							instructions.push(MovFromRBPMinus(RAX, offset));
+							instructions.push(MovIntoRBPMinus(var, RAX));
+						} else {
+							instructions.extend([
+								MovFromReg(RSI, RBP),
+								SubFromU32(RSI, offset),
+								MovFromReg(RDI, RBP),
+								SubFromU32(RDI, var),
+								MovFromU64(RCX, u64::from(size)),
+								RepMovsb,
+							]);
+						}
 					},
 					FireflyOperand::Constant(primitive) => match primitive {
 						FireflyPrimitive::Unity => (),
@@ -356,7 +404,8 @@ pub fn emit_statement(
 								RAX,
 								stack_frame
 									.get_field(projection)
-									.expect("failed to get field from stack frame"),
+									.expect("failed to get field from stack frame")
+									.1,
 							));
 						},
 						FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
@@ -370,8 +419,57 @@ pub fn emit_statement(
 				push_addition(instructions, left, stack_frame);
 				push_addition(instructions, right, stack_frame);
 			},
-			FireflyOperation::Binary(BinaryOperator::EqualsQuery, [left, right]) => todo!(),
-			FireflyOperation::Pair(fields) => todo!(),
+			FireflyOperation::Binary(BinaryOperator::EqualsQuery, [left, right]) => {},
+			FireflyOperation::Pair(fields) => {
+				let var = stack_frame.allocate(
+					binding.clone(),
+					FireflyType::Product(fields.iter().map(|(ty, _)| ty.clone()).collect::<Vec<_>>().into_boxed_slice()),
+				);
+
+				let mut pigeonhole = 0u32;
+				for (ty, operand) in fields.iter() {
+					let size = size_of_ty(&ty);
+					match operand {
+						FireflyOperand::Copy(projection) => {
+							let (_, offset) = stack_frame
+								.get_field(projection)
+								.expect("failed to get field from stack frame");
+
+							if size == 0 {
+								()
+							} else if size == 8 {
+								instructions.push(MovFromRBPMinus(RAX, offset));
+								instructions.push(MovIntoRBPMinus(var - pigeonhole, RAX));
+							} else {
+								instructions.extend([
+									MovFromReg(RSI, RBP),
+									SubFromU32(RSI, offset),
+									MovFromReg(RDI, RBP),
+									SubFromU32(RDI, var - pigeonhole),
+									MovFromU64(RCX, u64::from(size)),
+									RepMovsb,
+								]);
+							}
+						},
+						FireflyOperand::Constant(primitive) => match primitive {
+							FireflyPrimitive::Unity => (),
+							FireflyPrimitive::Polarity(pol) => {
+								instructions.push(MovFromI64(RAX, *pol as i64));
+								instructions.push(MovIntoRBPMinus(var - pigeonhole, RAX));
+							},
+							FireflyPrimitive::Integer(int) => {
+								instructions.push(MovFromI64(RAX, *int));
+								instructions.push(MovIntoRBPMinus(var - pigeonhole, RAX));
+							},
+							FireflyPrimitive::Procedure(label) => {
+								instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())));
+								instructions.push(MovIntoRBPMinus(var - pigeonhole, RAX));
+							},
+						},
+					}
+					pigeonhole += size;
+				}
+			},
 			FireflyOperation::Closure(procedure, captures) => todo!(),
 		},
 		FireflyStatement::DeclareContinuation {
@@ -437,34 +535,68 @@ pub fn emit_terminator(
 		} => {
 			match argument {
 				FireflyOperand::Copy(projection) => {
-					// FIXME: Assumes size of 8-bytes, wouldn't work for tuples, unit, etc.
-					instructions.push(MovFromRBPMinus(
-						RAX,
-						stack_frame.get_field(projection).expect("no such field"),
-					));
-				},
-				FireflyOperand::Constant(primitive) => match primitive {
-					FireflyPrimitive::Unity => (),
-					FireflyPrimitive::Polarity(p) => {
-						instructions.push(MovFromI64(RAX, *p as i64));
-					},
-					FireflyPrimitive::Integer(n) => {
-						instructions.push(MovFromI64(RAX, *n));
-					},
-					FireflyPrimitive::Procedure(label) => {
-						instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())))
-					},
-				},
-			}
+					let (ty, offset) = stack_frame
+						.get_field(projection)
+						.expect("failed to get field from stack frame");
+					let size = size_of_ty(&ty);
 
-			if let Some(continuation_label) = continuation_label {
-				let parameter = stack_frame.get_phi(continuation_label).expect("no such continuation");
+					if let Some(continuation_label) = continuation_label {
+						let parameter = stack_frame.get_phi(continuation_label).expect("no such continuation");
 
-				instructions.push(MovIntoRBPMinus(parameter, RAX));
-				instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
-			} else {
-				instructions.push(Leave);
-				instructions.push(Ret);
+						if size == 0 {
+							()
+						} else if size == 8 {
+							instructions.push(MovFromRBPMinus(RAX, offset));
+							instructions.push(MovIntoRBPMinus(parameter, RAX));
+						} else {
+							instructions.extend([
+								MovFromReg(RSI, RBP),
+								SubFromU32(RSI, offset),
+								MovFromReg(RDI, RBP),
+								SubFromU32(RDI, parameter),
+								MovFromU64(RCX, u64::from(size)),
+								RepMovsb,
+							]);
+						}
+						instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
+					} else {
+						if size == 0 {
+							()
+						} else if size == 8 {
+							instructions.push(MovFromRBPMinus(RAX, offset));
+						} else {
+							// TODO: Implement using a 'reference parameter' for the output.
+							unimplemented!();
+						}
+
+						instructions.push(Leave);
+						instructions.push(Ret);
+					}
+				},
+				FireflyOperand::Constant(primitive) => {
+					match primitive {
+						FireflyPrimitive::Unity => (),
+						FireflyPrimitive::Polarity(p) => {
+							instructions.push(MovFromI64(RAX, *p as i64));
+						},
+						FireflyPrimitive::Integer(n) => {
+							instructions.push(MovFromI64(RAX, *n));
+						},
+						FireflyPrimitive::Procedure(label) => {
+							instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())))
+						},
+					}
+
+					if let Some(continuation_label) = continuation_label {
+						let parameter = stack_frame.get_phi(continuation_label).expect("no such continuation");
+
+						instructions.push(MovIntoRBPMinus(parameter, RAX));
+						instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
+					} else {
+						instructions.push(Leave);
+						instructions.push(Ret);
+					}
+				},
 			}
 		},
 	}
@@ -478,8 +610,8 @@ pub fn size_of_ty(ty: &FireflyType) -> u32 {
 		FireflyType::Integer => 8,
 		FireflyType::Product(factors) => factors.iter().map(size_of_ty).fold(0, core::ops::Add::add),
 		FireflyType::Procedure => 8,
-		FireflyType::Snapshot => 8,
-		FireflyType::Closure => size_of_ty(&FireflyType::Procedure) + size_of_ty(&FireflyType::Snapshot),
+		FireflyType::Snapshot(_) => 8,
+		FireflyType::Closure => size_of_ty(&FireflyType::Procedure) + 8,
 	}
 }
 

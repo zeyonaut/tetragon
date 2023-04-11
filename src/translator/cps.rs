@@ -59,7 +59,10 @@ pub fn convert_expression_to_cps(
 
 			let (part_variables, part_contexts): (Vec<_>, Vec<_>) = parts
 				.into_iter()
-				.map(|(_, term)| convert_expression_to_cps(term, symbol_generator))
+				.map(|(ty, term)| {
+					let (projection, context) = convert_expression_to_cps(term, symbol_generator)?;
+					Some(((convert_type_to_cps(ty), projection), context))
+				})
 				.collect::<Option<Vec<_>>>()?
 				.into_iter()
 				.unzip();
@@ -288,7 +291,10 @@ pub fn convert_tail_expression_to_cps(
 
 			let (part_variables, part_contexts): (Vec<_>, Vec<_>) = parts
 				.into_iter()
-				.map(|(_, term)| convert_expression_to_cps(term, symbol_generator))
+				.map(|(ty, term)| {
+					let (projection, context) = convert_expression_to_cps(term, symbol_generator)?;
+					Some(((convert_type_to_cps(ty), projection), context))
+				})
 				.collect::<Option<Vec<_>>>()?
 				.into_iter()
 				.unzip();

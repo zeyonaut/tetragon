@@ -49,7 +49,7 @@ pub enum FireflyType {
 	Integer,
 	Product(Slice<Self>),
 	Procedure,
-	Snapshot,
+	Snapshot(Slice<Self>),
 	Closure,
 }
 
@@ -94,7 +94,7 @@ pub enum BinaryOperator {
 pub enum FireflyOperation {
 	Id(FireflyType, FireflyOperand),
 	Binary(BinaryOperator, [FireflyOperand; 2]),
-	Pair(Slice<FireflyOperand>),
+	Pair(Slice<(FireflyType, FireflyOperand)>),
 	Closure(FireflyOperand, Slice<FireflyOperand>),
 }
 
@@ -124,7 +124,7 @@ impl FireflyOperation {
 			FireflyOperation::Pair(parts) => Some(Tuple(
 				parts
 					.iter()
-					.map(|variable| compute(intrinsics, variables, variable))
+					.map(|(ty, operand)| compute(intrinsics, variables, operand))
 					.collect::<Option<Vec<_>>>()?
 					.into_boxed_slice(),
 			)),
