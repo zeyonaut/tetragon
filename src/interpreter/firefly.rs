@@ -14,6 +14,7 @@ pub enum FireflyProjector {
 	Free(usize),
 	Procedure,
 	Snapshot,
+	Dereference,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -62,6 +63,7 @@ pub enum FireflyValue {
 	Tuple(Slice<Self>),
 	Snapshot(Slice<Self>),
 	Closure(Box<Self>, Slice<Self>),
+	Address(FireflyProjection),
 }
 
 // Primitives are essentially nullary operations that can't fail.
@@ -92,6 +94,7 @@ pub enum BinaryOperator {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FireflyOperation {
+	Address(FireflyProjection),
 	Id(FireflyType, FireflyOperand),
 	Binary(BinaryOperator, [FireflyOperand; 2]),
 	Pair(Slice<(FireflyType, FireflyOperand)>),
@@ -106,6 +109,7 @@ impl FireflyOperation {
 	) -> Option<FireflyValue> {
 		use FireflyValue::*;
 		match self {
+			FireflyOperation::Address(projection) => Some(FireflyValue::Address(projection.clone())),
 			FireflyOperation::Id(_, operand) => compute(intrinsics, variables, operand),
 			FireflyOperation::Binary(operator, [x, y]) => match operator {
 				BinaryOperator::EqualsQuery(_) => Some(Polarity(
@@ -194,9 +198,10 @@ impl FireflyTerm {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FireflyProcedure {
 	pub environment: Option<Label>,
+	//pub snapshot: Slice<FireflyType>,
 	// TODO: Add type of environment. (a slice of types would be most convenient)
 	pub parameter: Option<Label>,
-	// TODO: Add domain.
+	pub domain: FireflyType,
 	pub body: FireflyTerm,
 	// TODO: Add codomain.
 }
@@ -321,6 +326,7 @@ impl FireflyProgram {
 					FireflyProcedure {
 						environment: Some(environment),
 						parameter: Some(right),
+						domain: FireflyType::Integer,
 						body: FireflyTerm {
 							statements: vec![FireflyStatement::Assign {
 								binding: output,
@@ -349,6 +355,7 @@ impl FireflyProgram {
 				FireflyProcedure {
 					environment: None,
 					parameter: Some(left),
+					domain: FireflyType::Integer,
 					body: FireflyTerm {
 						statements: vec![FireflyStatement::Assign {
 							binding: add_inner_closure,
@@ -378,6 +385,7 @@ impl FireflyProgram {
 				FireflyProcedure {
 					environment: None,
 					parameter: Some(input),
+					domain: FireflyType::Product(slice![FireflyType::Integer, FireflyType::Integer]),
 					body: FireflyTerm {
 						statements: vec![FireflyStatement::Assign {
 							binding: output,
@@ -452,6 +460,13 @@ fn lookup(
 			FireflyProjector::Snapshot => {
 				value = if let FireflyValue::Closure(_, snapshot) = value {
 					FireflyValue::Snapshot(snapshot)
+				} else {
+					return None;
+				}
+			},
+			FireflyProjector::Dereference => {
+				value = if let FireflyValue::Address(projection) = value {
+					lookup(intrinsics, environment, &projection)?
 				} else {
 					return None;
 				}

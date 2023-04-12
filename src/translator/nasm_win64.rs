@@ -74,20 +74,23 @@ pub enum NASMInstruction {
 	PushLabel(String),
 	Pop(NASMRegister64),
 	AddFromU32(NASMRegister64, u32),
+	AddFromI32(NASMRegister64, i32),
 	AddFromRBPMinus(NASMRegister64, u32),
+	AddFromAddress(NASMRegister64, (NASMRegister64, i32)),
 	AddFromReg(NASMRegister64, NASMRegister64),
 	SubFromU32(NASMRegister64, u32),
 	MovFromReg(NASMRegister64, NASMRegister64),
 	MovFromLabel(NASMRegister64, String),
 	MovFromU64(NASMRegister64, u64),
 	MovFromI64(NASMRegister64, i64),
-	MovFromRBPMinus(NASMRegister64, u32),
-	MovIntoRBPMinus(u32, NASMRegister64),
+	MovFromAddress(NASMRegister64, (NASMRegister64, i32)),
+	MovIntoAddress((NASMRegister64, i32), NASMRegister64),
 	MovZXR64FromR8(NASMRegister64, NASMRegister8),
 	SetE(NASMRegister8),
 	CmpALWithU8(u8),
 	CmpReg(NASMRegister64, NASMRegister64),
 	RepMovsb,
+	CallReg(NASMRegister64),
 	CallLabel(String),
 	Leave,
 	Ret,
@@ -103,16 +106,19 @@ impl NASMInstruction {
 			PushLabel(label) => format!("push {label}"),
 			Pop(reg) => format!("pop {reg}"),
 			AddFromU32(reg, imm) => format!("add {reg}, {imm}"),
+			AddFromI32(reg, imm) => format!("add {reg}, {imm}"),
 			AddFromRBPMinus(reg, offset) => format!("add {reg}, [rbp - {offset}]"),
+			AddFromAddress(dst, (src, offset)) => format!("add {dst}, [{src} + {offset}]"),
 			AddFromReg(reg_dst, reg_src) => format!("add {reg_dst}, {reg_src}"),
 			SubFromU32(reg, imm) => format!("sub {reg}, {imm}"),
 			MovFromReg(reg_dst, reg_src) => format!("mov {reg_dst}, {reg_src}"),
 			MovFromLabel(reg, label) => format!("mov {reg}, {label}"),
 			MovFromU64(reg, imm) => format!("mov {reg}, {imm}"),
 			MovFromI64(reg, imm) => format!("mov {reg}, {imm}"),
-			MovFromRBPMinus(reg, offset) => format!("mov {reg}, [rbp - {offset}]"),
-			MovIntoRBPMinus(offset, reg) => format!("mov [rbp - {offset}], {reg}"),
+			MovFromAddress(dst, (src, offset)) => format!("mov {dst}, [{src} + {offset}]"),
+			MovIntoAddress((dst, offset), src) => format!("mov [{dst} + {offset}], {src}"),
 			RepMovsb => format!("rep movsb"),
+			CallReg(reg) => format!("call {reg}"),
 			CallLabel(label) => format!("call {label}"),
 			Leave => format!("leave"),
 			Ret => format!("ret"),
@@ -134,9 +140,9 @@ pub struct NASMBlock {
 
 #[derive(Default)]
 pub struct StackFrame {
-	label_to_offset_from_frame_pointer: HashMap<Label, (FireflyType, u32)>,
+	label_to_offset_from_frame_pointer: HashMap<Label, (FireflyType, i32)>,
 	continuation_to_parameter: HashMap<Label, Label>,
-	current_frame_pointer_offset: u32,
+	current_frame_pointer_offset: i32,
 }
 
 impl StackFrame {
@@ -154,33 +160,39 @@ impl StackFrame {
 			.fold(0, |acc, (ty, _)| acc + size_of_ty(ty))
 	}
 
-	pub fn allocate(&mut self, label: Label, ty: FireflyType) -> u32 {
-		self.current_frame_pointer_offset += size_of_ty(&ty) as u32;
+	pub fn allocate(&mut self, label: Label, ty: FireflyType) -> i32 {
+		self.current_frame_pointer_offset -= size_of_ty(&ty) as i32;
 		self.label_to_offset_from_frame_pointer
 			.insert(label, (ty, self.current_frame_pointer_offset));
 		self.current_frame_pointer_offset
 	}
 
-	pub fn allocate_phi(&mut self, continuation: Label, parameter: Label, ty: FireflyType) -> u32 {
+	pub fn allocate_phi(&mut self, continuation: Label, parameter: Label, ty: FireflyType) -> i32 {
 		self.continuation_to_parameter.insert(continuation, parameter.clone());
 		self.allocate(parameter, ty)
 	}
 
-	pub fn get(&self, label: &Label) -> Option<(FireflyType, u32)> {
+	pub fn get(&self, label: &Label) -> Option<(FireflyType, i32)> {
 		self.label_to_offset_from_frame_pointer.get(&label).cloned()
 	}
 
-	pub fn get_field(&self, projection: &FireflyProjection) -> Option<(FireflyType, u32)> {
+	//pub fn get_field(&self, projection: &FireflyProjection) -> Option<(FireflyType, u32)> {
+	pub fn get_field(
+		&self,
+		projection: &FireflyProjection,
+	) -> Option<(/*Vec<NASMInstruction>, */ FireflyType, NASMRegister64, i32)> {
+		use NASMRegister64::*;
 		match projection.root {
 			CypressVariable::Local(local) => {
 				let (mut ty, mut offset) = self.get(&local)?;
+				let mut register = RBP;
 
 				for projector in &projection.projectors {
 					match projector {
 						FireflyProjector::Field(i) => {
 							if let FireflyType::Product(factors) = ty {
 								ty = factors.get(*i)?.clone();
-								offset -= factors.iter().take(*i).fold(0, |acc, ty| acc + size_of_ty(ty));
+								offset += factors.iter().take(*i).fold(0, |acc, ty| acc + size_of_ty(ty) as i32);
 							} else {
 								return None;
 							}
@@ -188,7 +200,7 @@ impl StackFrame {
 						FireflyProjector::Free(i) => {
 							if let FireflyType::Snapshot(factors) = ty {
 								ty = factors.get(*i)?.clone();
-								offset -= factors.iter().take(*i).fold(0, |acc, ty| acc + size_of_ty(ty));
+								offset += factors.iter().take(*i).fold(0, |acc, ty| acc + size_of_ty(ty) as i32);
 							} else {
 								return None;
 							}
@@ -208,19 +220,19 @@ impl StackFrame {
 								return None;
 							}
 						},
+						FireflyProjector::Dereference => unimplemented!(),
 					}
 				}
 
-				Some((ty, offset))
+				Some((ty, register, offset))
 			},
 			_ => None, // TODO: This would need a different return type, and wouldn't be relative to the frame pointer.
 		}
 	}
 
-	pub fn get_phi(&self, continuation: &Label) -> Option<u32> {
+	pub fn get_phi(&self, continuation: &Label) -> Option<(FireflyType, i32)> {
 		self.label_to_offset_from_frame_pointer
-			.get(&self.continuation_to_parameter.get(continuation).copied()?)
-			.map(|x| x.1)
+			.get(&self.continuation_to_parameter.get(continuation).copied()?).cloned()
 	}
 }
 
@@ -319,17 +331,34 @@ pub fn emit_procedure(label: Label, procedure: &FireflyProcedure) -> Option<NASM
 	use NASMRegister64::*;
 	let mut block_stack = Vec::new();
 	let mut stack_frame = StackFrame::default(); // Takes a label and gives an offset from the stack.
+
+	let parameter_offset = if let Some(parameter) = procedure.parameter {
+		Some(stack_frame.allocate(parameter, procedure.domain.clone()))
+	} else {
+		None
+	};
+
 	let entry = emit_term(&mut block_stack, &mut stack_frame, &procedure.body)?;
 
 	let stack_size = stack_frame.size();
 	let stack_shadow = 32;
 	let stack_padding = (16 - ((stack_size + 8) % 16)) % 16;
 
-	let prologue = Vec::from([
+	let mut prologue = Vec::from([
 		PushReg(RBP),
 		MovFromReg(RBP, RSP),
 		SubFromU32(RSP, stack_size + stack_shadow + stack_padding),
 	]);
+
+	let domain_size = size_of_ty(&procedure.domain);
+
+	if let Some(parameter_offset) = parameter_offset {
+		if domain_size == 0 {
+			()
+		} else {
+			prologue.push(MovIntoAddress((RBP, parameter_offset), RCX));
+		}
+	}
 
 	// This could enable potential tail recursion elimination
 	// Alternatively, introduce a 'functional' while loop primitive and force users to use that instead.
@@ -382,21 +411,25 @@ pub fn emit_statement(
 				let var = stack_frame.allocate(binding.clone(), ty.clone());
 				match operand {
 					FireflyOperand::Copy(projection) => {
-						let (_, offset) = stack_frame
+						let (_, reg, offset) = stack_frame
 							.get_field(projection)
 							.expect("failed to get field from stack frame");
 						let size = size_of_ty(&ty);
 						if size == 0 {
 							()
 						} else if size == 8 {
-							instructions.push(MovFromRBPMinus(RAX, offset));
-							instructions.push(MovIntoRBPMinus(var, RAX));
+							// getfield can return a list of instructions, a register to find an address in, and an immediate offset.
+							// that way, we can use a MovFromDeref with the pair...
+							// but we should give it a register to populate in the first place so we can control it to be RAX or whatever as a temporary register if not using RBP.
+							instructions.push(MovFromAddress(RAX, (reg, offset)));
+							instructions.push(MovIntoAddress((RBP, var), RAX));
 						} else {
+							// or movfromreg the register, then a sub/add.
 							instructions.extend([
-								MovFromReg(RSI, RBP),
-								SubFromU32(RSI, offset),
+								MovFromReg(RSI, reg),
+								AddFromI32(RSI, offset),
 								MovFromReg(RDI, RBP),
-								SubFromU32(RDI, var),
+								AddFromI32(RDI, var),
 								MovFromU64(RCX, u64::from(size)),
 								RepMovsb,
 							]);
@@ -406,15 +439,15 @@ pub fn emit_statement(
 						FireflyPrimitive::Unity => (),
 						FireflyPrimitive::Polarity(pol) => {
 							instructions.push(MovFromI64(RAX, *pol as i64));
-							instructions.push(MovIntoRBPMinus(var, RAX));
+							instructions.push(MovIntoAddress((RBP, var), RAX));
 						},
 						FireflyPrimitive::Integer(int) => {
 							instructions.push(MovFromI64(RAX, *int));
-							instructions.push(MovIntoRBPMinus(var, RAX));
+							instructions.push(MovIntoAddress((RBP, var), RAX));
 						},
 						FireflyPrimitive::Procedure(label) => {
 							instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())));
-							instructions.push(MovIntoRBPMinus(var, RAX));
+							instructions.push(MovIntoAddress((RBP, var), RAX));
 						},
 					},
 				}
@@ -426,13 +459,10 @@ pub fn emit_statement(
 				fn push_addition(instructions: &mut Vec<NASMInstruction>, operand: &FireflyOperand, stack_frame: &StackFrame) {
 					match operand {
 						FireflyOperand::Copy(projection) => {
-							instructions.push(AddFromRBPMinus(
-								RAX,
-								stack_frame
-									.get_field(projection)
-									.expect("failed to get field from stack frame")
-									.1,
-							));
+							let (_, reg, offset) = stack_frame
+								.get_field(projection)
+								.expect("failed to get field from stack frame");
+							instructions.push(AddFromAddress(RAX, (reg, offset)));
 						},
 						FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
 							instructions.push(MovFromI64(R10, *n));
@@ -444,13 +474,13 @@ pub fn emit_statement(
 
 				push_addition(instructions, left, stack_frame);
 				push_addition(instructions, right, stack_frame);
-				instructions.push(MovIntoRBPMinus(var, RAX));
+				instructions.push(MovIntoAddress((RBP, var), RAX));
 			},
 			FireflyOperation::Binary(BinaryOperator::EqualsQuery(ty), [left, right]) => {
 				let var = stack_frame.allocate(binding.clone(), FireflyType::Polarity);
 				let size = size_of_ty(ty);
 				if size == 0 {
-					instructions.extend([MovFromI64(RAX, 1), MovIntoRBPMinus(var, RAX)])
+					instructions.extend([MovFromI64(RAX, 1), MovIntoAddress((RBP, var), RAX)])
 				} else if size == 8 {
 					fn push_load(
 						size: u32,
@@ -461,12 +491,11 @@ pub fn emit_statement(
 					) {
 						match operand {
 							FireflyOperand::Copy(projection) => {
-								let offset = stack_frame
+								let (_, reg, offset) = stack_frame
 									.get_field(projection)
-									.expect("failed to get field from stack frame")
-									.1;
+									.expect("failed to get field from stack frame");
 
-								instructions.push(MovFromRBPMinus(register, offset));
+								instructions.push(MovFromAddress(register, (reg, offset)));
 							},
 							FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
 								instructions.push(MovFromI64(register, *n));
@@ -485,8 +514,15 @@ pub fn emit_statement(
 
 					push_load(size, instructions, R10, left, stack_frame);
 					push_load(size, instructions, R11, right, stack_frame);
-					instructions.extend([CmpReg(R10, R11), SetE(AL), MovZXR64FromR8(RAX, AL), MovIntoRBPMinus(var, RAX)]);
+					instructions.extend([
+						CmpReg(R10, R11),
+						SetE(AL),
+						MovZXR64FromR8(RAX, AL),
+						MovIntoAddress((RBP, var), RAX),
+					]);
 				} else {
+					// Equality queries for non-register-sized types?
+
 					unimplemented!();
 				}
 			},
@@ -496,26 +532,26 @@ pub fn emit_statement(
 					FireflyType::Product(fields.iter().map(|(ty, _)| ty.clone()).collect::<Vec<_>>().into_boxed_slice()),
 				);
 
-				let mut pigeonhole = 0u32;
+				let mut pigeonhole = 0i32;
 				for (ty, operand) in fields.iter() {
 					let size = size_of_ty(&ty);
 					match operand {
 						FireflyOperand::Copy(projection) => {
-							let (_, offset) = stack_frame
+							let (_, reg, offset) = stack_frame
 								.get_field(projection)
 								.expect("failed to get field from stack frame");
 
 							if size == 0 {
 								()
 							} else if size == 8 {
-								instructions.push(MovFromRBPMinus(RAX, offset));
-								instructions.push(MovIntoRBPMinus(var - pigeonhole, RAX));
+								instructions.push(MovFromAddress(RAX, (reg, offset)));
+								instructions.push(MovIntoAddress((RBP, var + pigeonhole), RAX));
 							} else {
 								instructions.extend([
 									MovFromReg(RSI, RBP),
-									SubFromU32(RSI, offset),
+									AddFromI32(RSI, offset),
 									MovFromReg(RDI, RBP),
-									SubFromU32(RDI, var - pigeonhole),
+									AddFromI32(RDI, var + pigeonhole),
 									MovFromU64(RCX, u64::from(size)),
 									RepMovsb,
 								]);
@@ -525,22 +561,50 @@ pub fn emit_statement(
 							FireflyPrimitive::Unity => (),
 							FireflyPrimitive::Polarity(pol) => {
 								instructions.push(MovFromI64(RAX, *pol as i64));
-								instructions.push(MovIntoRBPMinus(var - pigeonhole, RAX));
+								instructions.push(MovIntoAddress((RBP, var + pigeonhole), RAX));
 							},
 							FireflyPrimitive::Integer(int) => {
 								instructions.push(MovFromI64(RAX, *int));
-								instructions.push(MovIntoRBPMinus(var - pigeonhole, RAX));
+								instructions.push(MovIntoAddress((RBP, var + pigeonhole), RAX));
 							},
 							FireflyPrimitive::Procedure(label) => {
 								instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())));
-								instructions.push(MovIntoRBPMinus(var - pigeonhole, RAX));
+								instructions.push(MovIntoAddress((RBP, var + pigeonhole), RAX));
 							},
 						},
 					}
-					pigeonhole += size;
+					pigeonhole += size as i32;
 				}
 			},
-			FireflyOperation::Closure(procedure, captures) => todo!(),
+			FireflyOperation::Closure(procedure, captures) => {
+				let var = stack_frame.allocate(
+					binding.clone(),
+					FireflyType::Closure,
+				);
+
+				let proc_var = var;
+
+				match procedure {
+					FireflyOperand::Copy(projection) => {
+						let (_, reg, offset) = stack_frame
+							.get_field(projection)
+							.expect("failed to get field from stack frame");
+
+						instructions.push(MovFromAddress(RAX, (reg, offset)));
+						instructions.push(MovIntoAddress((RBP, proc_var), RAX));
+					},
+					FireflyOperand::Constant(primitive) => match primitive {
+						FireflyPrimitive::Procedure(label) => {
+							instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())));
+							instructions.push(MovIntoAddress((RBP, proc_var), RAX));
+						},
+						_ => panic!("bad primitive"),
+					},
+				}
+
+				// TODO/FIXME: Handle captures.
+			},
+			FireflyOperation::Address(projection) => todo!(),
 		},
 		FireflyStatement::DeclareContinuation {
 			label,
@@ -571,12 +635,12 @@ pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NA
 		} => {
 			match scrutinee {
 				FireflyOperand::Copy(projection) => {
-					let offset = stack_frame
+					let (_, reg, offset) = stack_frame
 						.get_field(projection)
-						.expect("failed to get field from stack frame")
-						.1;
+						.unwrap_or_else(|| panic!("failed to get {:#?}", projection));
+						//.expect("failed to get field from stack frame");
 
-					instructions.push(MovFromRBPMinus(RAX, offset));
+					instructions.push(MovFromAddress(RAX, (reg, offset)));
 				},
 				FireflyOperand::Constant(FireflyPrimitive::Polarity(b)) => {
 					instructions.push(MovFromI64(RAX, *b as i64));
@@ -597,17 +661,102 @@ pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NA
 			continuation_label,
 			argument,
 		} => {
-			if let Some(continuation_label) = continuation_label {
-				unimplemented!(); // FIXME: handle projections!!!!!!!!!
-				  /*match &argument.root {
-					  CypressVariable::Local(local) => {
-						  let source = stack_frame.get(local).unwrap();
-						  instructions.push(MovFromRBPMinus(RAX, source));
-						  instructions.push(PushLabel(label_from_id(continuation_label.clone())));
-						  instructions.push(Jump(label_from_id(continuation_label.clone())));
-					  },
-					  CypressVariable::Global(_) => unimplemented!(),
-				  }*/
+			let continuation_and_parameter = if let Some(continuation_label) = continuation_label {
+				Some((continuation_label, stack_frame.get_phi(continuation_label).expect("no such continuation")))
+			} else {
+				None
+			};
+			let procedure_label = match procedure {
+				FireflyOperand::Copy(projection) => {
+					let (ty, reg, offset) = stack_frame
+						.get_field(projection)
+						.expect("failed to get field from stack frame");
+					let size = size_of_ty(&ty);
+					instructions.push(MovFromAddress(RAX, (reg, offset)));
+					None
+				},
+				FireflyOperand::Constant(primitive) => match primitive {
+					FireflyPrimitive::Procedure(label) => {
+						Some(label.clone())
+					},
+					_ => panic!("bad procedure primitive"),
+				},
+			};
+			match argument {
+				FireflyOperand::Copy(projection) => {
+					let (ty, reg, offset) = stack_frame
+						.get_field(projection)
+						.expect("failed to get field from stack frame");
+					let size = size_of_ty(&ty);
+					if size == 0 {
+						()
+					} else if size == 8 {
+						instructions.push(MovFromAddress(RCX, (reg, offset)));
+					} else {
+						instructions.extend([
+							MovFromReg(RCX, reg),
+							AddFromI32(RCX, offset),
+						])
+					}
+				},
+				FireflyOperand::Constant(primitive) => match primitive {
+					FireflyPrimitive::Unity => (),
+					FireflyPrimitive::Polarity(p) => instructions.push(MovFromI64(RCX, *p as i64)),
+					FireflyPrimitive::Integer(n) => instructions.push(MovFromI64(RCX, *n)),
+					FireflyPrimitive::Procedure(label) => instructions.push(MovFromLabel(RCX, emit_procedure_label(label.clone()))),
+				},
+			}
+			match snapshot {
+				FireflyOperand::Copy(projection) => {
+					let (ty, reg, offset) = stack_frame
+						.get_field(projection)
+						.expect("failed to get field from stack frame");
+					instructions.push(MovFromAddress(RDX, (reg, offset)));
+				},
+				FireflyOperand::Constant(primitive) => match primitive {
+					_ => panic!("bad snapshot primitive"),
+				},
+			}
+			
+			if let Some((_, (continuation_parameter_ty, continuation_parameter_offset))) = &continuation_and_parameter {
+				if size_of_ty(&continuation_parameter_ty) > 8 {
+					instructions.extend([
+						MovFromReg(R8, RBP),
+						AddFromI32(R8, *continuation_parameter_offset)
+					])
+				} 
+			} else {
+				// FIXME: To write this, we need access to the return address offset for the current function from this function.
+				todo!();
+				/*instructions.extend([
+					MovFromAddress(R8, parame)
+				])*/
+			}
+
+			if let Some(procedure_label) = procedure_label {
+				instructions.push(CallLabel(emit_procedure_label(procedure_label)));
+			} else {
+				instructions.push(CallReg(RAX));
+			}
+
+			if let  Some((continuation, (continuation_parameter_ty, continuation_parameter_offset))) = continuation_and_parameter {
+				// TODO: Shouldn't compute this size twice; once is enough.
+				let codomain_size = size_of_ty(&continuation_parameter_ty);
+				if codomain_size == 0 {
+					()
+				} else if codomain_size == 8 {
+					// TODO: Handle sizes in the range 1..=7.
+					instructions.push(MovIntoAddress((RBP, continuation_parameter_offset), RAX));
+				} else {
+					()
+				}
+				
+				instructions.push(Jmp(emit_block_local_label(continuation.clone())));
+			} else {
+				instructions.extend([
+					Leave,
+					Ret,
+				])
 			}
 		},
 		FireflyTerminator::Jump {
@@ -616,25 +765,25 @@ pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NA
 		} => {
 			match argument {
 				FireflyOperand::Copy(projection) => {
-					let (ty, offset) = stack_frame
+					let (ty, reg, offset) = stack_frame
 						.get_field(projection)
 						.expect("failed to get field from stack frame");
 					let size = size_of_ty(&ty);
 
 					if let Some(continuation_label) = continuation_label {
-						let parameter = stack_frame.get_phi(continuation_label).expect("no such continuation");
+						let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
 
 						if size == 0 {
 							()
 						} else if size == 8 {
-							instructions.push(MovFromRBPMinus(RAX, offset));
-							instructions.push(MovIntoRBPMinus(parameter, RAX));
+							instructions.push(MovFromAddress(RAX, (reg, offset)));
+							instructions.push(MovIntoAddress((RBP, parameter), RAX));
 						} else {
 							instructions.extend([
 								MovFromReg(RSI, RBP),
-								SubFromU32(RSI, offset),
+								AddFromI32(RSI, offset),
 								MovFromReg(RDI, RBP),
-								SubFromU32(RDI, parameter),
+								AddFromI32(RDI, parameter),
 								MovFromU64(RCX, u64::from(size)),
 								RepMovsb,
 							]);
@@ -644,10 +793,16 @@ pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NA
 						if size == 0 {
 							()
 						} else if size == 8 {
-							instructions.push(MovFromRBPMinus(RAX, offset));
+							instructions.push(MovFromAddress(RAX, (reg, offset)));
 						} else {
-							// TODO: Implement using a 'reference parameter' for the output.
-							unimplemented!();
+							instructions.extend([
+								MovFromReg(RSI, reg),
+								AddFromI32(RSI, offset),
+								// FIXME: This is extremely fragile, as R8 might be used in an intermediate call. We need an environment parameter!
+								MovFromReg(RDI, R8),
+								MovFromU64(RCX, u64::from(size)),
+								RepMovsb,
+							]);
 						}
 
 						instructions.push(Leave);
@@ -669,9 +824,9 @@ pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NA
 					}
 
 					if let Some(continuation_label) = continuation_label {
-						let parameter = stack_frame.get_phi(continuation_label).expect("no such continuation");
+						let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
 
-						instructions.push(MovIntoRBPMinus(parameter, RAX));
+						instructions.push(MovIntoAddress((RBP, parameter), RAX));
 						instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
 					} else {
 						instructions.push(Leave);

@@ -53,6 +53,7 @@ impl Substitute for FireflyOperand {
 impl Substitute for FireflyOperation {
 	fn apply(&mut self, substitution: &Substitution) {
 		match self {
+			FireflyOperation::Address(projection) => projection.apply(substitution),
 			FireflyOperation::Id(_, operands) => operands.apply(substitution),
 			FireflyOperation::Binary(_, operands) => operands.iter_mut().map(|x| x.apply(substitution)).collect(),
 			FireflyOperation::Pair(operands) => operands.iter_mut().map(|(_, operand)| operand.apply(substitution)).collect(),
@@ -296,7 +297,7 @@ pub fn hoist_term(
 		CypressTerm::DeclareFunction {
 			binding,
 			fixpoint_name,
-			domain: _,
+			domain,
 			codomain: _,
 			parameter,
 			body,
@@ -354,6 +355,7 @@ pub fn hoist_term(
 					FireflyProcedure {
 						environment: Some(environment),
 						parameter: Some(parameter),
+						domain: hoist_ty(domain),
 						body,
 					},
 				);
@@ -441,6 +443,7 @@ pub fn hoist_program(term: CypressTerm, symbol_generator: &mut LabelGenerator) -
 		FireflyProcedure {
 			environment: None,
 			parameter: None,
+			domain: FireflyType::Unity,
 			body: entry_body,
 		},
 	);
