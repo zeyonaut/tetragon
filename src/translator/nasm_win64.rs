@@ -1,3 +1,5 @@
+use std::fmt::format;
+
 use halfbrown::HashMap;
 
 use super::label::Label;
@@ -17,6 +19,20 @@ pub enum NASMDefinition {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub enum NASMRegister8 {
+	AL,
+}
+
+impl core::fmt::Display for NASMRegister8 {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		use NASMRegister8::*;
+		f.write_str(match self {
+			AL => "al",
+		})
+	}
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum NASMRegister64 {
 	RAX, // Return Value
 	RCX, // Argument/Pointer to Argument
@@ -31,10 +47,10 @@ pub enum NASMRegister64 {
 	RDI,
 }
 
-impl ToString for NASMRegister64 {
-	fn to_string(&self) -> String {
+impl core::fmt::Display for NASMRegister64 {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		use NASMRegister64::*;
-		match self {
+		f.write_str(match self {
 			RAX => "rax",
 			RCX => "rcx",
 			RDX => "rdx",
@@ -46,14 +62,14 @@ impl ToString for NASMRegister64 {
 			RBP => "rbp",
 			RSI => "rsi",
 			RDI => "rdi",
-		}
-		.to_owned()
+		})
 	}
 }
 
 #[derive(Debug)]
 pub enum NASMInstruction {
 	Jmp(String),
+	JNE(String),
 	PushReg(NASMRegister64),
 	PushLabel(String),
 	Pop(NASMRegister64),
@@ -67,6 +83,10 @@ pub enum NASMInstruction {
 	MovFromI64(NASMRegister64, i64),
 	MovFromRBPMinus(NASMRegister64, u32),
 	MovIntoRBPMinus(u32, NASMRegister64),
+	MovZXR64FromR8(NASMRegister64, NASMRegister8),
+	SetE(NASMRegister8),
+	CmpALWithU8(u8),
+	CmpReg(NASMRegister64, NASMRegister64),
 	RepMovsb,
 	CallLabel(String),
 	Leave,
@@ -78,23 +98,28 @@ impl NASMInstruction {
 		use NASMInstruction::*;
 		match self {
 			Jmp(label) => format!("jmp {label}"),
-			PushReg(reg) => format!("push {}", reg.to_string()),
+			JNE(label) => format!("jne {label}"),
+			PushReg(reg) => format!("push {reg}"),
 			PushLabel(label) => format!("push {label}"),
-			Pop(reg) => format!("pop {}", reg.to_string()),
-			AddFromU32(reg, imm) => format!("add {}, {imm}", reg.to_string()),
-			AddFromRBPMinus(reg, offset) => format!("add {}, [rbp - {offset}]", reg.to_string()),
-			AddFromReg(reg_dst, reg_src) => format!("add {}, {}", reg_dst.to_string(), reg_src.to_string()),
-			SubFromU32(reg, imm) => format!("sub {}, {imm}", reg.to_string()),
-			MovFromReg(reg_dst, reg_src) => format!("mov {}, {}", reg_dst.to_string(), reg_src.to_string()),
-			MovFromLabel(reg, label) => format!("mov {}, {label}", reg.to_string()),
-			MovFromU64(reg, imm) => format!("mov {}, {imm}", reg.to_string()),
-			MovFromI64(reg, imm) => format!("mov {}, {imm}", reg.to_string()),
-			MovFromRBPMinus(reg, offset) => format!("mov {}, [rbp - {offset}]", reg.to_string()),
-			MovIntoRBPMinus(offset, reg) => format!("mov [rbp - {offset}], {}", reg.to_string()),
+			Pop(reg) => format!("pop {reg}"),
+			AddFromU32(reg, imm) => format!("add {reg}, {imm}"),
+			AddFromRBPMinus(reg, offset) => format!("add {reg}, [rbp - {offset}]"),
+			AddFromReg(reg_dst, reg_src) => format!("add {reg_dst}, {reg_src}"),
+			SubFromU32(reg, imm) => format!("sub {reg}, {imm}"),
+			MovFromReg(reg_dst, reg_src) => format!("mov {reg_dst}, {reg_src}"),
+			MovFromLabel(reg, label) => format!("mov {reg}, {label}"),
+			MovFromU64(reg, imm) => format!("mov {reg}, {imm}"),
+			MovFromI64(reg, imm) => format!("mov {reg}, {imm}"),
+			MovFromRBPMinus(reg, offset) => format!("mov {reg}, [rbp - {offset}]"),
+			MovIntoRBPMinus(offset, reg) => format!("mov [rbp - {offset}], {reg}"),
 			RepMovsb => format!("rep movsb"),
 			CallLabel(label) => format!("call {label}"),
 			Leave => format!("leave"),
 			Ret => format!("ret"),
+			MovZXR64FromR8(dst, src) => format!("movzx {dst}, {src}"),
+			SetE(dst) => format!("sete {dst}"),
+			CmpALWithU8(imm) => format!("cmp al, {imm}"),
+			CmpReg(left, right) => format!("cmp {left}, {right}"),
 		}
 	}
 }
@@ -299,7 +324,6 @@ pub fn emit_procedure(label: Label, procedure: &FireflyProcedure) -> Option<NASM
 	let stack_size = stack_frame.size();
 	let stack_shadow = 32;
 	let stack_padding = (16 - ((stack_size + 8) % 16)) % 16;
-	println!("{stack_padding}");
 
 	let prologue = Vec::from([
 		PushReg(RBP),
@@ -351,13 +375,14 @@ pub fn emit_statement(
 ) {
 	use NASMInstruction::*;
 	use NASMRegister64::*;
+	use NASMRegister8::*;
 	match statement {
 		FireflyStatement::Assign { binding, operation } => match operation {
 			FireflyOperation::Id(ty, operand) => {
 				let var = stack_frame.allocate(binding.clone(), ty.clone());
 				match operand {
 					FireflyOperand::Copy(projection) => {
-						let (ty, offset) = stack_frame
+						let (_, offset) = stack_frame
 							.get_field(projection)
 							.expect("failed to get field from stack frame");
 						let size = size_of_ty(&ty);
@@ -395,6 +420,7 @@ pub fn emit_statement(
 				}
 			},
 			FireflyOperation::Binary(BinaryOperator::Add, [left, right]) => {
+				let var = stack_frame.allocate(binding.clone(), FireflyType::Integer);
 				instructions.push(MovFromU64(RAX, 0));
 
 				fn push_addition(instructions: &mut Vec<NASMInstruction>, operand: &FireflyOperand, stack_frame: &StackFrame) {
@@ -418,8 +444,52 @@ pub fn emit_statement(
 
 				push_addition(instructions, left, stack_frame);
 				push_addition(instructions, right, stack_frame);
+				instructions.push(MovIntoRBPMinus(var, RAX));
 			},
-			FireflyOperation::Binary(BinaryOperator::EqualsQuery, [left, right]) => {},
+			FireflyOperation::Binary(BinaryOperator::EqualsQuery(ty), [left, right]) => {
+				let var = stack_frame.allocate(binding.clone(), FireflyType::Polarity);
+				let size = size_of_ty(ty);
+				if size == 0 {
+					instructions.extend([MovFromI64(RAX, 1), MovIntoRBPMinus(var, RAX)])
+				} else if size == 8 {
+					fn push_load(
+						size: u32,
+						instructions: &mut Vec<NASMInstruction>,
+						register: NASMRegister64,
+						operand: &FireflyOperand,
+						stack_frame: &StackFrame,
+					) {
+						match operand {
+							FireflyOperand::Copy(projection) => {
+								let offset = stack_frame
+									.get_field(projection)
+									.expect("failed to get field from stack frame")
+									.1;
+
+								instructions.push(MovFromRBPMinus(register, offset));
+							},
+							FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
+								instructions.push(MovFromI64(register, *n));
+							},
+							FireflyOperand::Constant(FireflyPrimitive::Polarity(b)) => {
+								instructions.push(MovFromI64(register, *b as i64));
+							},
+							FireflyOperand::Constant(FireflyPrimitive::Unity) => {
+								panic!("Invalid operand encountered.");
+							},
+							FireflyOperand::Constant(FireflyPrimitive::Procedure(label)) => {
+								instructions.push(MovFromLabel(register, emit_procedure_label(label.clone())));
+							},
+						}
+					}
+
+					push_load(size, instructions, R10, left, stack_frame);
+					push_load(size, instructions, R11, right, stack_frame);
+					instructions.extend([CmpReg(R10, R11), SetE(AL), MovZXR64FromR8(RAX, AL), MovIntoRBPMinus(var, RAX)]);
+				} else {
+					unimplemented!();
+				}
+			},
 			FireflyOperation::Pair(fields) => {
 				let var = stack_frame.allocate(
 					binding.clone(),
@@ -490,13 +560,7 @@ pub fn emit_statement(
 	}
 }
 
-pub fn emit_terminator(
-	terminator: &FireflyTerminator,
-	instructions: &mut Vec<NASMInstruction>,
-	//location_by_variable: &HashMap<CypressVariable, NASMLocation>,
-	//stack_variables: &mut HashMap<Label, u32>,
-	stack_frame: &mut StackFrame,
-) {
+pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NASMInstruction>, stack_frame: &mut StackFrame) {
 	use NASMInstruction::*;
 	use NASMRegister64::*;
 	match terminator {
@@ -505,10 +569,27 @@ pub fn emit_terminator(
 			yes_continuation,
 			no_continuation,
 		} => {
-			//instructions.extend([
-			//
-			//])
-			unimplemented!();
+			match scrutinee {
+				FireflyOperand::Copy(projection) => {
+					let offset = stack_frame
+						.get_field(projection)
+						.expect("failed to get field from stack frame")
+						.1;
+
+					instructions.push(MovFromRBPMinus(RAX, offset));
+				},
+				FireflyOperand::Constant(FireflyPrimitive::Polarity(b)) => {
+					instructions.push(MovFromI64(RAX, *b as i64));
+				},
+				FireflyOperand::Constant(_) => {
+					panic!("Invalid operand encountered.");
+				},
+			}
+			instructions.extend([
+				CmpALWithU8(0),
+				JNE(emit_block_local_label(yes_continuation.clone())),
+				Jmp(emit_block_local_label(no_continuation.clone())),
+			]);
 		},
 		FireflyTerminator::Apply {
 			procedure,

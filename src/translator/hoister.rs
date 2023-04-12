@@ -126,7 +126,7 @@ fn get_if_local(projection: &CypressProjection) -> Option<Label> {
 pub fn compute_free_variables_in_operation(operation: &CypressOperation) -> HashSet<Label> {
 	match operation {
 		CypressOperation::Id(_, x) => [x].into_iter().filter_map(get_if_local).collect(),
-		CypressOperation::EqualsQuery(x) => x.into_iter().filter_map(get_if_local).collect(),
+		CypressOperation::EqualsQuery(_, x) => x.into_iter().filter_map(get_if_local).collect(),
 		CypressOperation::Add(x) => x.into_iter().filter_map(get_if_local).collect(),
 		CypressOperation::Pair(vs) => (*vs)
 			.into_iter()
@@ -228,8 +228,8 @@ pub fn hoist_primitive(value: CypressPrimitive) -> FireflyPrimitive {
 pub fn hoist_operation(operation: CypressOperation) -> FireflyOperation {
 	match operation {
 		CypressOperation::Id(ty, x) => FireflyOperation::Id(hoist_ty(ty), FireflyOperand::Copy(hoist_projection(x))),
-		CypressOperation::EqualsQuery(x) => FireflyOperation::Binary(
-			BinaryOperator::EqualsQuery,
+		CypressOperation::EqualsQuery(ty, x) => FireflyOperation::Binary(
+			BinaryOperator::EqualsQuery(hoist_ty(ty)),
 			x.map(|x| FireflyOperand::Copy(hoist_projection(x))),
 		),
 		CypressOperation::Add(x) => {

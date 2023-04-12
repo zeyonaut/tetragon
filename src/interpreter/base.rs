@@ -38,6 +38,7 @@ pub enum BaseTerm {
 		rest: Box<Self>,
 	},
 	EqualityQuery {
+		ty: BaseType,
 		left: Box<Self>,
 		right: Box<Self>,
 	},
@@ -77,7 +78,11 @@ impl BaseTerm {
 				definition: _,
 				rest: _,
 			} => ty.clone(),
-			Self::EqualityQuery { left: _, right: _ } => BaseType::Polarity,
+			Self::EqualityQuery {
+				ty: _,
+				left: _,
+				right: _,
+			} => BaseType::Polarity,
 			Self::CaseSplit {
 				ty,
 				scrutinee: _,
@@ -222,7 +227,7 @@ pub fn interpret_base(base_term: BaseTerm, environment: BaseEnvironment) -> Opti
 			let definition = interpret_base(*definition, environment.clone())?;
 			interpret_base(*rest, environment.extend(BaseVariable::Auto(binding), definition))
 		},
-		EqualityQuery { left, right } => {
+		EqualityQuery { ty: _, left, right } => {
 			let left = interpret_base(*left, environment.clone())?;
 			let right = interpret_base(*right, environment)?;
 			match (left, right) {

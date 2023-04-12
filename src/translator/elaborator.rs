@@ -252,8 +252,10 @@ pub fn elaborate_term(
 		},
 		(None, ParsedTerm::EqualityQuery { left, right }) => {
 			let left = elaborate_term(context.clone(), *left, None, names, numbers, symbol_generator)?;
-			let right = elaborate_term(context, *right, Some(left.ty()), names, numbers, symbol_generator)?;
+			let ty = left.ty();
+			let right = elaborate_term(context, *right, Some(ty.clone()), names, numbers, symbol_generator)?;
 			Some(BaseTerm::EqualityQuery {
+				ty,
 				left: Box::new(left),
 				right: Box::new(right),
 			})

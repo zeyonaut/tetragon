@@ -180,7 +180,7 @@ pub fn convert_expression_to_cps(
 				}),
 			))
 		},
-		BaseTerm::EqualityQuery { left, right } => {
+		BaseTerm::EqualityQuery { ty, left, right } => {
 			let [binding] = symbol_generator.fresh();
 			let (left_variable, left_context) = convert_expression_to_cps(*left, symbol_generator)?;
 			let (right_variable, right_context) = convert_expression_to_cps(*right, symbol_generator)?;
@@ -190,7 +190,7 @@ pub fn convert_expression_to_cps(
 				Box::new(move |body| {
 					left_context(right_context(CypressTerm::AssignOperation {
 						binding,
-						operation: CypressOperation::EqualsQuery([left_variable, right_variable]),
+						operation: CypressOperation::EqualsQuery(convert_type_to_cps(ty), [left_variable, right_variable]),
 						rest: Box::new(body),
 					}))
 				}),
@@ -384,7 +384,7 @@ pub fn convert_tail_expression_to_cps(
 				)?),
 			})
 		},
-		BaseTerm::EqualityQuery { left, right } => {
+		BaseTerm::EqualityQuery { ty, left, right } => {
 			let [binding] = symbol_generator.fresh();
 
 			let (left_variable, left_context) = convert_expression_to_cps(*left, symbol_generator)?;
@@ -392,7 +392,10 @@ pub fn convert_tail_expression_to_cps(
 
 			Some(left_context(right_context(CypressTerm::AssignOperation {
 				binding,
-				operation: CypressOperation::EqualsQuery([left_variable.clone(), right_variable.clone()]),
+				operation: CypressOperation::EqualsQuery(
+					convert_type_to_cps(ty),
+					[left_variable.clone(), right_variable.clone()],
+				),
 				rest: Box::new(CypressTerm::Continue {
 					continuation_label,
 					argument: CypressProjection::new(CypressVariable::Local(binding)),

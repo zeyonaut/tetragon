@@ -86,7 +86,7 @@ impl FireflyPrimitive {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryOperator {
-	EqualsQuery,
+	EqualsQuery(FireflyType),
 	Add,
 }
 
@@ -106,9 +106,9 @@ impl FireflyOperation {
 	) -> Option<FireflyValue> {
 		use FireflyValue::*;
 		match self {
-			FireflyOperation::Id(ty, operand) => compute(intrinsics, variables, operand),
+			FireflyOperation::Id(_, operand) => compute(intrinsics, variables, operand),
 			FireflyOperation::Binary(operator, [x, y]) => match operator {
-				BinaryOperator::EqualsQuery => Some(Polarity(
+				BinaryOperator::EqualsQuery(_) => Some(Polarity(
 					compute(intrinsics, variables, x)? == compute(intrinsics, variables, y)?,
 				)),
 				BinaryOperator::Add => {
