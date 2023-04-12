@@ -1,6 +1,4 @@
-use std::collections::HashSet;
-
-use halfbrown::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::label::{Label, LabelGenerator};
 use crate::{
@@ -13,7 +11,7 @@ use crate::{
 			FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyType,
 		},
 	},
-	utility::ignore::Ignore,
+	utility::{ignore::Ignore, slice::slice},
 };
 
 struct Substitution(HashMap<Label, FireflyProjection>);
@@ -104,6 +102,7 @@ impl Substitute for FireflyTerm {
 			} => scrutinee.apply(substitution),
 			FireflyTerminator::Apply {
 				procedure,
+				codomain: _,
 				snapshot,
 				continuation_label: _,
 				argument,
@@ -124,19 +123,23 @@ fn get_if_local(projection: &CypressProjection) -> Option<Label> {
 	}
 }
 
-pub fn compute_free_variables_in_operation(operation: &CypressOperation) -> HashSet<Label> {
+pub fn compute_free_variables_in_operation(operation: &CypressOperation) -> HashMap<Label, CypressType> {
 	match operation {
-		CypressOperation::Id(_, x) => [x].into_iter().filter_map(get_if_local).collect(),
-		CypressOperation::EqualsQuery(_, x) => x.into_iter().filter_map(get_if_local).collect(),
-		CypressOperation::Add(x) => x.into_iter().filter_map(get_if_local).collect(),
+		CypressOperation::Id(ty, x) => [x].into_iter().filter_map(get_if_local).map(|x| (x, ty.clone())).collect(),
+		CypressOperation::EqualsQuery(ty, x) => x.into_iter().filter_map(get_if_local).map(|x| (x, ty.clone())).collect(),
+		CypressOperation::Add(x) => x
+			.into_iter()
+			.filter_map(get_if_local)
+			.map(|x| (x, CypressType::Integer))
+			.collect(),
 		CypressOperation::Pair(vs) => (*vs)
 			.into_iter()
-			.filter_map(|(ty, projection)| get_if_local(projection))
+			.filter_map(|(ty, x)| get_if_local(x).map(|x| (x, ty.clone())))
 			.collect(),
 	}
 }
 
-pub fn compute_free_variables_in_term(term: &CypressTerm) -> HashSet<Label> {
+pub fn compute_free_variables_in_term(term: &CypressTerm) -> HashMap<Label, CypressType> {
 	match term {
 		CypressTerm::AssignValue {
 			binding,
@@ -192,16 +195,39 @@ pub fn compute_free_variables_in_term(term: &CypressTerm) -> HashSet<Label> {
 			scrutinee,
 			yes_continuation: _,
 			no_continuation: _,
-		} => [scrutinee].into_iter().filter_map(get_if_local).collect(),
+		} => [scrutinee]
+			.into_iter()
+			.filter_map(get_if_local)
+			.map(|x| (x, CypressType::Polarity))
+			.collect(),
 		CypressTerm::Apply {
 			function,
+			domain,
+			codomain,
 			continuation: _,
 			argument,
-		} => [function, argument].into_iter().filter_map(get_if_local).collect(),
+		} => [
+			(
+				function,
+				CypressType::Power {
+					domain: Box::new(domain.clone()),
+					codomain: Box::new(codomain.clone()),
+				},
+			),
+			(argument, domain.clone()),
+		]
+		.into_iter()
+		.filter_map(|(x, ty)| get_if_local(x).map(|x| (x, ty)))
+		.collect(),
 		CypressTerm::Continue {
 			continuation_label: _,
 			argument,
-		} => [argument].into_iter().filter_map(get_if_local).collect(),
+			domain,
+		} => [argument]
+			.into_iter()
+			.filter_map(get_if_local)
+			.map(|x| (x, domain.clone()))
+			.collect(),
 	}
 }
 
@@ -298,7 +324,7 @@ pub fn hoist_term(
 			binding,
 			fixpoint_name,
 			domain,
-			codomain: _,
+			codomain,
 			parameter,
 			body,
 			rest,
@@ -321,7 +347,7 @@ pub fn hoist_term(
 						.iter()
 						.cloned()
 						.enumerate()
-						.map(|(i, variable)| {
+						.map(|(i, (variable, _))| {
 							(
 								variable,
 								FireflyProjection::new(CypressVariable::Local(environment)).project(FireflyProjector::Free(i)),
@@ -353,9 +379,13 @@ pub fn hoist_term(
 				procedures.insert(
 					procedure_label,
 					FireflyProcedure {
-						environment: Some(environment),
+						capture: Some((
+							environment,
+							free_variables.iter().map(|(_, ty)| hoist_ty(ty.clone())).collect(),
+						)),
 						parameter: Some(parameter),
 						domain: hoist_ty(domain),
+						codomain: hoist_ty(codomain),
 						body,
 					},
 				);
@@ -365,7 +395,7 @@ pub fn hoist_term(
 			{
 				let captures = free_variables
 					.into_iter()
-					.map(|variable| FireflyOperand::Copy(FireflyProjection::new(CypressVariable::Local(variable))))
+					.map(|(variable, _)| FireflyOperand::Copy(FireflyProjection::new(CypressVariable::Local(variable))))
 					.collect::<Vec<_>>()
 					.into_boxed_slice();
 
@@ -409,18 +439,22 @@ pub fn hoist_term(
 		}),
 		CypressTerm::Apply {
 			function,
+			domain: _,
+			codomain,
 			continuation,
 			argument,
 		} => {
 			let function_projection = hoist_projection(function);
 			FireflyTerm::new(FireflyTerminator::Apply {
 				procedure: FireflyOperand::Copy(function_projection.clone().project(FireflyProjector::Procedure)),
+				codomain: hoist_ty(codomain),
 				snapshot: FireflyOperand::Copy(function_projection.project(FireflyProjector::Snapshot)),
 				continuation_label: continuation,
 				argument: FireflyOperand::Copy(hoist_projection(argument)),
 			})
 		},
 		CypressTerm::Continue {
+			domain: _,
 			continuation_label,
 			argument,
 		} => FireflyTerm::new(FireflyTerminator::Jump {
@@ -432,18 +466,20 @@ pub fn hoist_term(
 
 // Closure conversion turns functions, which may have free variables, into closures, which bundle a procedure label and an environment.
 // All nested function declarations are hoisted to the top level of the program as first-order procedures.
-pub fn hoist_program(term: CypressTerm, symbol_generator: &mut LabelGenerator) -> FireflyProgram {
+pub fn hoist_program(term: CypressTerm, ty: CypressType, symbol_generator: &mut LabelGenerator) -> FireflyProgram {
 	let mut procedures = HashMap::<Label, FireflyProcedure>::new();
 
+	//let codomain = hoist_ty(term.ty)
 	let entry_body = hoist_term(term, &mut procedures, symbol_generator);
 
 	let [entry] = symbol_generator.fresh();
 	procedures.insert(
 		entry,
 		FireflyProcedure {
-			environment: None,
+			capture: None,
 			parameter: None,
 			domain: FireflyType::Unity,
+			codomain: hoist_ty(ty),
 			body: entry_body,
 		},
 	);

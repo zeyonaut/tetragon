@@ -1,8 +1,6 @@
-use std::fmt::format;
+use std::{collections::HashMap, fmt::format};
 
-use halfbrown::HashMap;
-
-use super::label::Label;
+use super::label::{Label, LabelGenerator};
 use crate::{
 	interpreter::{
 		cypress::CypressVariable,
@@ -232,7 +230,8 @@ impl StackFrame {
 
 	pub fn get_phi(&self, continuation: &Label) -> Option<(FireflyType, i32)> {
 		self.label_to_offset_from_frame_pointer
-			.get(&self.continuation_to_parameter.get(continuation).copied()?).cloned()
+			.get(&self.continuation_to_parameter.get(continuation).copied()?)
+			.cloned()
 	}
 }
 
@@ -286,7 +285,7 @@ pub fn emit_program(program: FireflyProgram) -> Option<Vec<NASMProcedure>> {
 	let mut globals = HashMap::new();
 
 	for (&label, ff_procedure) in &ff_procedures {
-		procedures.push(emit_procedure(label, ff_procedure)?);
+		procedures.push(emit_procedure(&mut symbol_generator, label, ff_procedure)?);
 	}
 
 	procedures.push(emit_main(&ff_procedures, ff_entry, &mut globals));
@@ -326,7 +325,11 @@ pub fn emit_main(
 	}
 }
 
-pub fn emit_procedure(label: Label, procedure: &FireflyProcedure) -> Option<NASMProcedure> {
+pub fn emit_procedure(
+	symbol_generator: &mut LabelGenerator,
+	label: Label,
+	procedure: &FireflyProcedure,
+) -> Option<NASMProcedure> {
 	use NASMInstruction::*;
 	use NASMRegister64::*;
 	let mut block_stack = Vec::new();
@@ -338,7 +341,21 @@ pub fn emit_procedure(label: Label, procedure: &FireflyProcedure) -> Option<NASM
 		None
 	};
 
-	let entry = emit_term(&mut block_stack, &mut stack_frame, &procedure.body)?;
+	let capture_parameter_offset = if let Some((capture_parameter, capture_requisites)) = &procedure.capture {
+		Some(stack_frame.allocate(capture_parameter.clone(), FireflyType::Snapshot(capture_requisites.clone())))
+	} else {
+		None
+	};
+
+	let codomain_size = size_of_ty(&procedure.codomain);
+	let [mailbox] = symbol_generator.fresh();
+	let mailbox_offset = if codomain_size > 8 {
+		Some(stack_frame.allocate(mailbox.clone(), procedure.codomain.clone()))
+	} else {
+		None
+	};
+
+	let entry = emit_term(&mut block_stack, &mut stack_frame, mailbox_offset, &procedure.body)?;
 
 	let stack_size = stack_frame.size();
 	let stack_shadow = 32;
@@ -360,6 +377,14 @@ pub fn emit_procedure(label: Label, procedure: &FireflyProcedure) -> Option<NASM
 		}
 	}
 
+	if let Some(capture_parameter_offset) = capture_parameter_offset {
+		prologue.push(MovIntoAddress((RBP, capture_parameter_offset), RDX));
+	}
+
+	if let Some(mailbox_offset) = mailbox_offset {
+		prologue.push(MovIntoAddress((RBP, mailbox_offset), R8));
+	}
+
 	// This could enable potential tail recursion elimination
 	// Alternatively, introduce a 'functional' while loop primitive and force users to use that instead.
 	block_stack.push(NASMBlock {
@@ -377,6 +402,7 @@ pub fn emit_procedure(label: Label, procedure: &FireflyProcedure) -> Option<NASM
 pub fn emit_term(
 	block_stack: &mut Vec<NASMBlock>,
 	stack_frame: &mut StackFrame,
+	mailbox_offset: Option<i32>,
 	term: &FireflyTerm,
 ) -> Option<Vec<NASMInstruction>> {
 	use NASMInstruction::*;
@@ -384,10 +410,10 @@ pub fn emit_term(
 	let mut instructions = Vec::new();
 
 	for statement in term.statements.iter().rev() {
-		emit_statement(block_stack, statement, &mut instructions, stack_frame)
+		emit_statement(block_stack, mailbox_offset, statement, &mut instructions, stack_frame)
 	}
 
-	emit_terminator(&term.terminator, &mut instructions, stack_frame);
+	emit_terminator(mailbox_offset, &term.terminator, &mut instructions, stack_frame);
 
 	Some(instructions)
 }
@@ -398,6 +424,7 @@ pub fn emit_block_local_label(label: Label) -> String {
 
 pub fn emit_statement(
 	block_stack: &mut Vec<NASMBlock>,
+	mailbox_offset: Option<i32>,
 	statement: &FireflyStatement,
 	instructions: &mut Vec<NASMInstruction>,
 	stack_frame: &mut StackFrame,
@@ -577,10 +604,7 @@ pub fn emit_statement(
 				}
 			},
 			FireflyOperation::Closure(procedure, captures) => {
-				let var = stack_frame.allocate(
-					binding.clone(),
-					FireflyType::Closure,
-				);
+				let var = stack_frame.allocate(binding.clone(), FireflyType::Closure);
 
 				let proc_var = var;
 
@@ -614,7 +638,7 @@ pub fn emit_statement(
 		} => {
 			stack_frame.allocate_phi(label.clone(), parameter.clone(), domain.clone());
 
-			let instructions = emit_term(block_stack, stack_frame, body).unwrap();
+			let instructions = emit_term(block_stack, stack_frame, mailbox_offset, body).unwrap();
 
 			block_stack.push(NASMBlock {
 				local_label: emit_block_local_label(label.clone()),
@@ -624,7 +648,12 @@ pub fn emit_statement(
 	}
 }
 
-pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NASMInstruction>, stack_frame: &mut StackFrame) {
+pub fn emit_terminator(
+	mailbox_offset: Option<i32>,
+	terminator: &FireflyTerminator,
+	instructions: &mut Vec<NASMInstruction>,
+	stack_frame: &mut StackFrame,
+) {
 	use NASMInstruction::*;
 	use NASMRegister64::*;
 	match terminator {
@@ -638,7 +667,7 @@ pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NA
 					let (_, reg, offset) = stack_frame
 						.get_field(projection)
 						.unwrap_or_else(|| panic!("failed to get {:#?}", projection));
-						//.expect("failed to get field from stack frame");
+					//.expect("failed to get field from stack frame");
 
 					instructions.push(MovFromAddress(RAX, (reg, offset)));
 				},
@@ -657,12 +686,17 @@ pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NA
 		},
 		FireflyTerminator::Apply {
 			procedure,
+			codomain,
 			snapshot,
 			continuation_label,
 			argument,
 		} => {
+			let codomain_size = size_of_ty(codomain);
 			let continuation_and_parameter = if let Some(continuation_label) = continuation_label {
-				Some((continuation_label, stack_frame.get_phi(continuation_label).expect("no such continuation")))
+				Some((
+					continuation_label,
+					stack_frame.get_phi(continuation_label).expect("no such continuation"),
+				))
 			} else {
 				None
 			};
@@ -676,9 +710,7 @@ pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NA
 					None
 				},
 				FireflyOperand::Constant(primitive) => match primitive {
-					FireflyPrimitive::Procedure(label) => {
-						Some(label.clone())
-					},
+					FireflyPrimitive::Procedure(label) => Some(label.clone()),
 					_ => panic!("bad procedure primitive"),
 				},
 			};
@@ -693,17 +725,16 @@ pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NA
 					} else if size == 8 {
 						instructions.push(MovFromAddress(RCX, (reg, offset)));
 					} else {
-						instructions.extend([
-							MovFromReg(RCX, reg),
-							AddFromI32(RCX, offset),
-						])
+						instructions.extend([MovFromReg(RCX, reg), AddFromI32(RCX, offset)])
 					}
 				},
 				FireflyOperand::Constant(primitive) => match primitive {
 					FireflyPrimitive::Unity => (),
 					FireflyPrimitive::Polarity(p) => instructions.push(MovFromI64(RCX, *p as i64)),
 					FireflyPrimitive::Integer(n) => instructions.push(MovFromI64(RCX, *n)),
-					FireflyPrimitive::Procedure(label) => instructions.push(MovFromLabel(RCX, emit_procedure_label(label.clone()))),
+					FireflyPrimitive::Procedure(label) => {
+						instructions.push(MovFromLabel(RCX, emit_procedure_label(label.clone())))
+					},
 				},
 			}
 			match snapshot {
@@ -717,20 +748,15 @@ pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NA
 					_ => panic!("bad snapshot primitive"),
 				},
 			}
-			
-			if let Some((_, (continuation_parameter_ty, continuation_parameter_offset))) = &continuation_and_parameter {
-				if size_of_ty(&continuation_parameter_ty) > 8 {
-					instructions.extend([
-						MovFromReg(R8, RBP),
-						AddFromI32(R8, *continuation_parameter_offset)
-					])
-				} 
-			} else {
-				// FIXME: To write this, we need access to the return address offset for the current function from this function.
-				todo!();
-				/*instructions.extend([
-					MovFromAddress(R8, parame)
-				])*/
+
+			if codomain_size > 8 {
+				if let Some((_, (_, continuation_parameter_offset))) = &continuation_and_parameter {
+					instructions.extend([MovFromReg(R8, RBP), AddFromI32(R8, *continuation_parameter_offset)])
+				} else if let Some(mailbox_offset) = mailbox_offset {
+					instructions.push(MovFromAddress(R8, (RBP, mailbox_offset)));
+				} else {
+					panic!("no mailbox to return an oversized value to")
+				}
 			}
 
 			if let Some(procedure_label) = procedure_label {
@@ -739,9 +765,7 @@ pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NA
 				instructions.push(CallReg(RAX));
 			}
 
-			if let  Some((continuation, (continuation_parameter_ty, continuation_parameter_offset))) = continuation_and_parameter {
-				// TODO: Shouldn't compute this size twice; once is enough.
-				let codomain_size = size_of_ty(&continuation_parameter_ty);
+			if let Some((continuation, (_, continuation_parameter_offset))) = continuation_and_parameter {
 				if codomain_size == 0 {
 					()
 				} else if codomain_size == 8 {
@@ -750,90 +774,86 @@ pub fn emit_terminator(terminator: &FireflyTerminator, instructions: &mut Vec<NA
 				} else {
 					()
 				}
-				
+
 				instructions.push(Jmp(emit_block_local_label(continuation.clone())));
 			} else {
-				instructions.extend([
-					Leave,
-					Ret,
-				])
+				instructions.extend([Leave, Ret])
 			}
 		},
 		FireflyTerminator::Jump {
 			continuation_label,
 			argument,
-		} => {
-			match argument {
-				FireflyOperand::Copy(projection) => {
-					let (ty, reg, offset) = stack_frame
-						.get_field(projection)
-						.expect("failed to get field from stack frame");
-					let size = size_of_ty(&ty);
+		} => match argument {
+			FireflyOperand::Copy(projection) => {
+				let (ty, reg, offset) = stack_frame
+					.get_field(projection)
+					.expect("failed to get field from stack frame");
+				let size = size_of_ty(&ty);
 
-					if let Some(continuation_label) = continuation_label {
-						let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
+				if let Some(continuation_label) = continuation_label {
+					let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
 
-						if size == 0 {
-							()
-						} else if size == 8 {
-							instructions.push(MovFromAddress(RAX, (reg, offset)));
-							instructions.push(MovIntoAddress((RBP, parameter), RAX));
-						} else {
-							instructions.extend([
-								MovFromReg(RSI, RBP),
-								AddFromI32(RSI, offset),
-								MovFromReg(RDI, RBP),
-								AddFromI32(RDI, parameter),
-								MovFromU64(RCX, u64::from(size)),
-								RepMovsb,
-							]);
-						}
-						instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
-					} else {
-						if size == 0 {
-							()
-						} else if size == 8 {
-							instructions.push(MovFromAddress(RAX, (reg, offset)));
-						} else {
-							instructions.extend([
-								MovFromReg(RSI, reg),
-								AddFromI32(RSI, offset),
-								// FIXME: This is extremely fragile, as R8 might be used in an intermediate call. We need an environment parameter!
-								MovFromReg(RDI, R8),
-								MovFromU64(RCX, u64::from(size)),
-								RepMovsb,
-							]);
-						}
-
-						instructions.push(Leave);
-						instructions.push(Ret);
-					}
-				},
-				FireflyOperand::Constant(primitive) => {
-					match primitive {
-						FireflyPrimitive::Unity => (),
-						FireflyPrimitive::Polarity(p) => {
-							instructions.push(MovFromI64(RAX, *p as i64));
-						},
-						FireflyPrimitive::Integer(n) => {
-							instructions.push(MovFromI64(RAX, *n));
-						},
-						FireflyPrimitive::Procedure(label) => {
-							instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())))
-						},
-					}
-
-					if let Some(continuation_label) = continuation_label {
-						let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
-
+					if size == 0 {
+						()
+					} else if size == 8 {
+						instructions.push(MovFromAddress(RAX, (reg, offset)));
 						instructions.push(MovIntoAddress((RBP, parameter), RAX));
-						instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
 					} else {
-						instructions.push(Leave);
-						instructions.push(Ret);
+						instructions.extend([
+							MovFromReg(RSI, RBP),
+							AddFromI32(RSI, offset),
+							MovFromReg(RDI, RBP),
+							AddFromI32(RDI, parameter),
+							MovFromU64(RCX, u64::from(size)),
+							RepMovsb,
+						]);
 					}
-				},
-			}
+					instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
+				} else {
+					if size == 0 {
+						()
+					} else if size == 8 {
+						instructions.push(MovFromAddress(RAX, (reg, offset)));
+					} else if let Some(mailbox_offset) = mailbox_offset {
+						instructions.extend([
+							MovFromReg(RSI, reg),
+							AddFromI32(RSI, offset),
+							MovFromAddress(RDI, (RBP, mailbox_offset)),
+							MovFromU64(RCX, u64::from(size)),
+							RepMovsb,
+						]);
+					} else {
+						panic!("oversized value (or between-sized) but no mailbox to return to")
+					}
+
+					instructions.push(Leave);
+					instructions.push(Ret);
+				}
+			},
+			FireflyOperand::Constant(primitive) => {
+				match primitive {
+					FireflyPrimitive::Unity => (),
+					FireflyPrimitive::Polarity(p) => {
+						instructions.push(MovFromI64(RAX, *p as i64));
+					},
+					FireflyPrimitive::Integer(n) => {
+						instructions.push(MovFromI64(RAX, *n));
+					},
+					FireflyPrimitive::Procedure(label) => {
+						instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())))
+					},
+				}
+
+				if let Some(continuation_label) = continuation_label {
+					let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
+
+					instructions.push(MovIntoAddress((RBP, parameter), RAX));
+					instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
+				} else {
+					instructions.push(Leave);
+					instructions.push(Ret);
+				}
+			},
 		},
 	}
 }

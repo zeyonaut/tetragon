@@ -207,7 +207,7 @@ pub fn elaborate_term(
 			if let BaseType::Power { domain, codomain } = function.ty() {
 				let argument = elaborate_term(context, *argument, Some(*domain), names, numbers, symbol_generator)?;
 				Some(BaseTerm::Application {
-					ty: *codomain,
+					codomain: *codomain,
 					function: Box::new(function),
 					argument: Box::new(argument),
 				})

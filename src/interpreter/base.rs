@@ -27,7 +27,7 @@ pub enum BaseTerm {
 		body: Box<Self>,
 	},
 	Application {
-		ty: BaseType,
+		codomain: BaseType,
 		function: Box<Self>,
 		argument: Box<Self>,
 	},
@@ -68,7 +68,7 @@ impl BaseTerm {
 				codomain: Box::new(codomain.clone()),
 			},
 			Self::Application {
-				ty,
+				codomain: ty,
 				function: _,
 				argument: _,
 			} => ty.clone(),
@@ -206,7 +206,7 @@ pub fn interpret_base(base_term: BaseTerm, environment: BaseEnvironment) -> Opti
 			}
 		},
 		Application {
-			ty: _,
+			codomain: _,
 			function,
 			argument,
 		} => {

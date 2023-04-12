@@ -1,6 +1,4 @@
-use std::hash::Hash;
-
-use halfbrown::HashMap;
+use std::{collections::HashMap, hash::Hash};
 
 use super::cypress::CypressVariable;
 use crate::{
@@ -169,6 +167,7 @@ pub enum FireflyTerminator {
 	},
 	Apply {
 		procedure: FireflyOperand,
+		codomain: FireflyType,
 		snapshot: FireflyOperand,
 		continuation_label: Option<Label>,
 		argument: FireflyOperand,
@@ -197,12 +196,12 @@ impl FireflyTerm {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FireflyProcedure {
-	pub environment: Option<Label>,
-	//pub snapshot: Slice<FireflyType>,
+	pub capture: Option<(Label, Slice<FireflyType>)>,
 	// TODO: Add type of environment. (a slice of types would be most convenient)
 	pub parameter: Option<Label>,
 	pub domain: FireflyType,
 	pub body: FireflyTerm,
+	pub codomain: FireflyType,
 	// TODO: Add codomain.
 }
 
@@ -264,6 +263,7 @@ impl FireflyProgram {
 				},
 				FireflyTerminator::Apply {
 					procedure,
+					codomain: _,
 					snapshot,
 					continuation_label,
 					argument,
@@ -280,7 +280,7 @@ impl FireflyProgram {
 						let argument = compute(&intrinsics, &environment, argument)?;
 
 						environment = HashMap::new();
-						if let Some(shadow) = procedure.environment {
+						if let Some((shadow, _)) = procedure.capture {
 							environment.insert(shadow, snapshot);
 						}
 						if let Some(parameter) = procedure.parameter {
@@ -324,9 +324,10 @@ impl FireflyProgram {
 				self.procedures.insert(
 					add_inner,
 					FireflyProcedure {
-						environment: Some(environment),
+						capture: Some((environment, slice![FireflyType::Integer])),
 						parameter: Some(right),
 						domain: FireflyType::Integer,
+						codomain: FireflyType::Integer,
 						body: FireflyTerm {
 							statements: vec![FireflyStatement::Assign {
 								binding: output,
@@ -353,9 +354,10 @@ impl FireflyProgram {
 			self.procedures.insert(
 				add,
 				FireflyProcedure {
-					environment: None,
+					capture: None,
 					parameter: Some(left),
 					domain: FireflyType::Integer,
+					codomain: FireflyType::Closure,
 					body: FireflyTerm {
 						statements: vec![FireflyStatement::Assign {
 							binding: add_inner_closure,
@@ -383,9 +385,10 @@ impl FireflyProgram {
 			self.procedures.insert(
 				add2,
 				FireflyProcedure {
-					environment: None,
+					capture: None,
 					parameter: Some(input),
 					domain: FireflyType::Product(slice![FireflyType::Integer, FireflyType::Integer]),
+					codomain: FireflyType::Integer,
 					body: FireflyTerm {
 						statements: vec![FireflyStatement::Assign {
 							binding: output,

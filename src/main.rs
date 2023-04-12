@@ -41,7 +41,12 @@ use utility::*;
 
 use crate::{
 	interpreter::base::{evaluate_base, interpret_base, BaseEnvironment, BaseValue, BaseVariable},
-	translator::{cps::convert_program_to_cps, elaborator::elaborate_program, hoister::hoist_program, nasm_win64},
+	translator::{
+		cps::{convert_program_to_cps, convert_type_to_cps},
+		elaborator::elaborate_program,
+		hoister::hoist_program,
+		nasm_win64,
+	},
 };
 
 fn main() {
@@ -78,6 +83,7 @@ fn main() {
 
 		//println!("Interpreted value: {:#?}", interpreted_value);
 
+		let cypress_ty = convert_type_to_cps(elaborated_term.ty());
 		let cypress_term =
 			convert_program_to_cps(elaborated_term, &mut symbol_generator).expect("Failed to convert base term to CPS.");
 
@@ -93,7 +99,7 @@ fn main() {
 
 		//println!("CPS-converted value: {:#?}", cypress_value);
 
-		let firefly_program = hoist_program(cypress_term, &mut symbol_generator);
+		let firefly_program = hoist_program(cypress_term, cypress_ty, &mut symbol_generator);
 
 		//println!("Hoisted program: {:#?}", firefly_program);
 

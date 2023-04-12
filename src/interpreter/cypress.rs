@@ -33,7 +33,7 @@ impl CypressProjection {
 	}
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum CypressType {
 	Unity,
 	Polarity,
@@ -94,11 +94,14 @@ pub enum CypressTerm {
 	}, // Continuations should have unit domain. (For now.) Scrutinee should be a polarity.
 	Apply {
 		function: CypressProjection,
+		domain: CypressType,
+		codomain: CypressType,
 		continuation: Option<Label>,
 		argument: CypressProjection,
 	},
 	Continue {
 		continuation_label: Option<Label>,
 		argument: CypressProjection,
+		domain: CypressType,
 	},
 }
