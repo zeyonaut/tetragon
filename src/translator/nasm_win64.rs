@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::format};
+use std::collections::HashMap;
 
 use super::label::{Label, LabelGenerator};
 use crate::{
@@ -82,7 +82,10 @@ pub enum NASMInstruction {
 	MovFromU64(NASMRegister64, u64),
 	MovFromI64(NASMRegister64, i64),
 	MovFromAddress(NASMRegister64, (NASMRegister64, i32)),
-	MovIntoAddress((NASMRegister64, i32), NASMRegister64),
+	MovIntoAddressFromReg((NASMRegister64, i32), NASMRegister64),
+	MovIntoAddressFromU64((NASMRegister64, i32), u64),
+	MovIntoAddressFromI64((NASMRegister64, i32), i64),
+	MovIntoAddressFromLabel((NASMRegister64, i32), String),
 	MovZXR64FromR8(NASMRegister64, NASMRegister8),
 	SetE(NASMRegister8),
 	CmpALWithU8(u8),
@@ -114,7 +117,10 @@ impl NASMInstruction {
 			MovFromU64(reg, imm) => format!("mov {reg}, {imm}"),
 			MovFromI64(reg, imm) => format!("mov {reg}, {imm}"),
 			MovFromAddress(dst, (src, offset)) => format!("mov {dst}, [{src} + {offset}]"),
-			MovIntoAddress((dst, offset), src) => format!("mov [{dst} + {offset}], {src}"),
+			MovIntoAddressFromReg((dst, offset), src) => format!("mov [{dst} + {offset}], {src}"),
+			MovIntoAddressFromU64((dst, offset), imm) => format!("mov qword [{dst} + {offset}], {imm}"),
+			MovIntoAddressFromI64((dst, offset), imm) => format!("mov qword [{dst} + {offset}], {imm}"),
+			MovIntoAddressFromLabel((dst, offset), label) => format!("mov qword [{dst} + {offset}], {label}"),
 			RepMovsb => format!("rep movsb"),
 			CallReg(reg) => format!("call {reg}"),
 			CallLabel(label) => format!("call {label}"),
@@ -174,7 +180,6 @@ impl StackFrame {
 		self.label_to_offset_from_frame_pointer.get(&label).cloned()
 	}
 
-	//pub fn get_field(&self, projection: &FireflyProjection) -> Option<(FireflyType, u32)> {
 	pub fn load<const IS_BY_VALUE: bool>(
 		&self,
 		destination: NASMRegister64,
@@ -210,7 +215,11 @@ impl StackFrame {
 						},
 						FireflyProjector::Free(i) => {
 							if let FireflyType::Snapshot(factors) = ty {
-								// TODO: Use dereference.
+								instructions.push(MovFromAddress(destination, (source, offset)));
+								source = destination;
+								// We leave space for the reference count.
+								offset = 8;
+
 								ty = factors.get(*i).unwrap().clone();
 								offset += factors.iter().take(*i).fold(0, |acc, ty| acc + size_of_ty(ty) as i32);
 							} else {
@@ -227,7 +236,7 @@ impl StackFrame {
 						},
 						FireflyProjector::Snapshot => {
 							if let FireflyType::Closure = ty {
-								// TODO: We need this to have an actual type.
+								// FIXME: We need this to have an actual type. Unknown, I guess.
 								// TODO: Use dereference.
 								ty = FireflyType::Snapshot(slice![]);
 								offset += 8;
@@ -250,7 +259,7 @@ impl StackFrame {
 					}
 				}
 			},
-			_ => (), // TODO: Not on stack?
+			_ => unimplemented!(), // TODO: Not on stack?
 		}
 	}
 
@@ -263,7 +272,7 @@ impl StackFrame {
 
 pub fn emit_assembly(procedures: Vec<NASMProcedure>) -> String {
 	let mut assembly = r#"global main
-extern printf
+extern free, malloc, printf
 
 section .data
 result:
@@ -314,16 +323,12 @@ pub fn emit_program(program: FireflyProgram) -> Option<Vec<NASMProcedure>> {
 		procedures.push(emit_procedure(&mut symbol_generator, label, ff_procedure)?);
 	}
 
-	procedures.push(emit_main(&ff_procedures, ff_entry, &mut globals));
+	procedures.push(emit_main(ff_entry, &mut globals));
 
 	Some(procedures)
 }
 
-pub fn emit_main(
-	procedures: &HashMap<Label, FireflyProcedure>,
-	entry: Label,
-	globals: &mut HashMap<String, NASMDefinition>,
-) -> NASMProcedure {
+pub fn emit_main(entry: Label, globals: &mut HashMap<String, NASMDefinition>) -> NASMProcedure {
 	use NASMDefinition::*;
 	use NASMInstruction::*;
 	use NASMRegister64::*;
@@ -368,7 +373,11 @@ pub fn emit_procedure(
 	};
 
 	let capture_parameter_offset = if let Some((capture_parameter, capture_requisites)) = &procedure.capture {
-		Some(stack_frame.allocate(capture_parameter.clone(), FireflyType::Snapshot(capture_requisites.clone())))
+		if capture_requisites.len() == 0 {
+			None
+		} else {
+			Some(stack_frame.allocate(capture_parameter.clone(), FireflyType::Snapshot(capture_requisites.clone())))
+		}
 	} else {
 		None
 	};
@@ -399,16 +408,16 @@ pub fn emit_procedure(
 		if domain_size == 0 {
 			()
 		} else {
-			prologue.push(MovIntoAddress((RBP, parameter_offset), RCX));
+			prologue.push(MovIntoAddressFromReg((RBP, parameter_offset), RCX));
 		}
 	}
 
 	if let Some(capture_parameter_offset) = capture_parameter_offset {
-		prologue.push(MovIntoAddress((RBP, capture_parameter_offset), RDX));
+		prologue.push(MovIntoAddressFromReg((RBP, capture_parameter_offset), RDX));
 	}
 
 	if let Some(mailbox_offset) = mailbox_offset {
-		prologue.push(MovIntoAddress((RBP, mailbox_offset), R8));
+		prologue.push(MovIntoAddressFromReg((RBP, mailbox_offset), R8));
 	}
 
 	// This could enable potential tail recursion elimination
@@ -431,8 +440,6 @@ pub fn emit_term(
 	mailbox_offset: Option<i32>,
 	term: &FireflyTerm,
 ) -> Option<Vec<NASMInstruction>> {
-	use NASMInstruction::*;
-	use NASMRegister64::*;
 	let mut instructions = Vec::new();
 
 	for statement in term.statements.iter().rev() {
@@ -468,13 +475,9 @@ pub fn emit_statement(
 						if size == 0 {
 							()
 						} else if size == 8 {
-							// getfield can return a list of instructions, a register to find an address in, and an immediate offset.
-							// that way, we can use a MovFromDeref with the pair...
-							// but we should give it a register to populate in the first place so we can control it to be RAX or whatever as a temporary register if not using RBP.
 							stack_frame.load::<true>(RAX, projection, instructions);
-							instructions.push(MovIntoAddress((RBP, var), RAX));
+							instructions.push(MovIntoAddressFromReg((RBP, var), RAX));
 						} else {
-							// or movfromreg the register, then a sub/add.
 							stack_frame.load::<false>(RSI, projection, instructions);
 							instructions.extend([
 								MovFromReg(RDI, RBP),
@@ -488,15 +491,15 @@ pub fn emit_statement(
 						FireflyPrimitive::Unity => (),
 						FireflyPrimitive::Polarity(pol) => {
 							instructions.push(MovFromI64(RAX, *pol as i64));
-							instructions.push(MovIntoAddress((RBP, var), RAX));
+							instructions.push(MovIntoAddressFromReg((RBP, var), RAX));
 						},
 						FireflyPrimitive::Integer(int) => {
 							instructions.push(MovFromI64(RAX, *int));
-							instructions.push(MovIntoAddress((RBP, var), RAX));
+							instructions.push(MovIntoAddressFromReg((RBP, var), RAX));
 						},
 						FireflyPrimitive::Procedure(label) => {
 							instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())));
-							instructions.push(MovIntoAddress((RBP, var), RAX));
+							instructions.push(MovIntoAddressFromReg((RBP, var), RAX));
 						},
 					},
 				}
@@ -523,16 +526,15 @@ pub fn emit_statement(
 
 				push_addition(instructions, left, stack_frame);
 				push_addition(instructions, right, stack_frame);
-				instructions.push(MovIntoAddress((RBP, var), RAX));
+				instructions.push(MovIntoAddressFromReg((RBP, var), RAX));
 			},
 			FireflyOperation::Binary(BinaryOperator::EqualsQuery(ty), [left, right]) => {
 				let var = stack_frame.allocate(binding.clone(), FireflyType::Polarity);
 				let size = size_of_ty(ty);
 				if size == 0 {
-					instructions.extend([MovFromI64(RAX, 1), MovIntoAddress((RBP, var), RAX)])
+					instructions.extend([MovFromI64(RAX, 1), MovIntoAddressFromReg((RBP, var), RAX)])
 				} else if size == 8 {
 					fn push_load(
-						size: u32,
 						instructions: &mut Vec<NASMInstruction>,
 						register: NASMRegister64,
 						operand: &FireflyOperand,
@@ -540,6 +542,7 @@ pub fn emit_statement(
 					) {
 						match operand {
 							FireflyOperand::Copy(projection) => {
+								// NOTE: We currently do not support equality queries for oversized values, so this works fine for now.
 								stack_frame.load::<true>(register, projection, instructions);
 							},
 							FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
@@ -557,13 +560,13 @@ pub fn emit_statement(
 						}
 					}
 
-					push_load(size, instructions, R10, left, stack_frame);
-					push_load(size, instructions, R11, right, stack_frame);
+					push_load(instructions, R10, left, stack_frame);
+					push_load(instructions, R11, right, stack_frame);
 					instructions.extend([
 						CmpReg(R10, R11),
 						SetE(AL),
 						MovZXR64FromR8(RAX, AL),
-						MovIntoAddress((RBP, var), RAX),
+						MovIntoAddressFromReg((RBP, var), RAX),
 					]);
 				} else {
 					// Equality queries for non-register-sized types?
@@ -586,7 +589,7 @@ pub fn emit_statement(
 								()
 							} else if size == 8 {
 								stack_frame.load::<true>(RAX, projection, instructions);
-								instructions.push(MovIntoAddress((RBP, var + pigeonhole), RAX));
+								instructions.push(MovIntoAddressFromReg((RBP, var + pigeonhole), RAX));
 							} else {
 								stack_frame.load::<false>(RSI, projection, instructions);
 								instructions.extend([
@@ -601,15 +604,15 @@ pub fn emit_statement(
 							FireflyPrimitive::Unity => (),
 							FireflyPrimitive::Polarity(pol) => {
 								instructions.push(MovFromI64(RAX, *pol as i64));
-								instructions.push(MovIntoAddress((RBP, var + pigeonhole), RAX));
+								instructions.push(MovIntoAddressFromReg((RBP, var + pigeonhole), RAX));
 							},
 							FireflyPrimitive::Integer(int) => {
 								instructions.push(MovFromI64(RAX, *int));
-								instructions.push(MovIntoAddress((RBP, var + pigeonhole), RAX));
+								instructions.push(MovIntoAddressFromReg((RBP, var + pigeonhole), RAX));
 							},
 							FireflyPrimitive::Procedure(label) => {
 								instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())));
-								instructions.push(MovIntoAddress((RBP, var + pigeonhole), RAX));
+								instructions.push(MovIntoAddressFromReg((RBP, var + pigeonhole), RAX));
 							},
 						},
 					}
@@ -624,20 +627,75 @@ pub fn emit_statement(
 				match procedure {
 					FireflyOperand::Copy(projection) => {
 						stack_frame.load::<true>(RAX, projection, instructions);
-						instructions.push(MovIntoAddress((RBP, proc_var), RAX));
+						instructions.push(MovIntoAddressFromReg((RBP, proc_var), RAX));
 					},
 					FireflyOperand::Constant(primitive) => match primitive {
 						FireflyPrimitive::Procedure(label) => {
 							instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())));
-							instructions.push(MovIntoAddress((RBP, proc_var), RAX));
+							instructions.push(MovIntoAddressFromReg((RBP, proc_var), RAX));
 						},
 						_ => panic!("bad primitive"),
 					},
 				}
 
-				// TODO/FIXME: Handle captures.
+				let snapshot_var = var + 8;
+
+				if captures.len() > 0 {
+					// The size to allocate is the size of the reference counter (8, a u64) + the size of a tuple consisting of the captures. Alignment is not an issue, as the maximum alignment should be 8.
+					let size = 8 + size_of_ty(&FireflyType::Product(
+						captures
+							.iter()
+							.map(|(ty, _)| ty.clone())
+							.collect::<Vec<_>>()
+							.into_boxed_slice(),
+					));
+					instructions.push(MovFromU64(RCX, size as u64));
+					instructions.push(CallLabel("malloc".to_owned()));
+					instructions.push(MovIntoAddressFromU64((RAX, 0), 1));
+
+					let mut capture_offset = 8;
+					for (capture_ty, capture) in captures.into_iter() {
+						let capture_size = size_of_ty(capture_ty);
+						match capture {
+							FireflyOperand::Copy(projection) => {
+								if capture_size == 0 {
+									()
+								} else if capture_size == 8 {
+									stack_frame.load::<true>(R10, projection, instructions);
+									instructions.push(MovIntoAddressFromReg((RAX, capture_offset), R10));
+								} else {
+									stack_frame.load::<false>(RSI, projection, instructions);
+									instructions.extend([
+										MovFromReg(RDI, RAX),
+										AddFromI32(RDI, capture_offset),
+										MovFromU64(RCX, u64::from(size)),
+										RepMovsb,
+									]);
+								}
+							},
+							FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
+								instructions.push(MovIntoAddressFromI64((RAX, capture_offset), *n));
+							},
+							FireflyOperand::Constant(FireflyPrimitive::Polarity(b)) => {
+								instructions.push(MovIntoAddressFromI64((RAX, capture_offset), *b as i64));
+							},
+							FireflyOperand::Constant(FireflyPrimitive::Unity) => {
+								panic!("Invalid operand encountered.");
+							},
+							FireflyOperand::Constant(FireflyPrimitive::Procedure(label)) => {
+								instructions.push(MovIntoAddressFromLabel(
+									(RAX, capture_offset),
+									emit_procedure_label(label.clone()),
+								));
+							},
+						}
+						capture_offset += capture_size as i32;
+					}
+
+					instructions.push(MovIntoAddressFromReg((RBP, snapshot_var), RAX));
+				}
 			},
-			FireflyOperation::Address(projection) => todo!(),
+			FireflyOperation::Address(_) => unimplemented!(),
 		},
 		FireflyStatement::DeclareContinuation {
 			label,
@@ -765,7 +823,7 @@ pub fn emit_terminator(
 					()
 				} else if codomain_size == 8 {
 					// TODO: Handle sizes in the range 1..=7.
-					instructions.push(MovIntoAddress((RBP, continuation_parameter_offset), RAX));
+					instructions.push(MovIntoAddressFromReg((RBP, continuation_parameter_offset), RAX));
 				} else {
 					()
 				}
@@ -790,7 +848,7 @@ pub fn emit_terminator(
 						()
 					} else if size == 8 {
 						stack_frame.load::<true>(RAX, projection, instructions);
-						instructions.push(MovIntoAddress((RBP, parameter), RAX));
+						instructions.push(MovIntoAddressFromReg((RBP, parameter), RAX));
 					} else {
 						stack_frame.load::<false>(RSI, projection, instructions);
 						instructions.extend([
@@ -838,7 +896,7 @@ pub fn emit_terminator(
 				if let Some(continuation_label) = continuation_label {
 					let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
 
-					instructions.push(MovIntoAddress((RBP, parameter), RAX));
+					instructions.push(MovIntoAddressFromReg((RBP, parameter), RAX));
 					instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
 				} else {
 					instructions.push(Leave);

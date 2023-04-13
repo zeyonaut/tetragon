@@ -97,7 +97,7 @@ pub enum FireflyOperation {
 	Id(FireflyType, FireflyOperand),
 	Binary(BinaryOperator, [FireflyOperand; 2]),
 	Pair(Slice<(FireflyType, FireflyOperand)>),
-	Closure(FireflyOperand, Slice<FireflyOperand>),
+	Closure(FireflyOperand, Slice<(FireflyType, FireflyOperand)>),
 }
 
 impl FireflyOperation {
@@ -127,7 +127,7 @@ impl FireflyOperation {
 			FireflyOperation::Pair(parts) => Some(Tuple(
 				parts
 					.iter()
-					.map(|(ty, operand)| compute(intrinsics, variables, operand))
+					.map(|(_, operand)| compute(intrinsics, variables, operand))
 					.collect::<Option<Vec<_>>>()?
 					.into_boxed_slice(),
 			)),
@@ -135,7 +135,7 @@ impl FireflyOperation {
 				let procedure = compute(intrinsics, variables, procedure)?;
 				let snapshot_operands = snapshot_operands
 					.into_iter()
-					.map(|operand| Some(compute(intrinsics, variables, operand)?))
+					.map(|(_, operand)| Some(compute(intrinsics, variables, operand)?))
 					.collect::<Option<Vec<_>>>()?
 					.into_boxed_slice();
 
@@ -372,8 +372,12 @@ impl FireflyProgram {
 							binding: add_inner_closure,
 							operation: FireflyOperation::Closure(
 								FireflyOperand::Constant(FireflyPrimitive::Procedure(add_inner)),
-								slice![FireflyOperand::Copy(
-									FireflyProjection::new(CypressVariable::Local(left)).project(FireflyProjector::Parameter)
+								slice![(
+									FireflyType::Integer,
+									FireflyOperand::Copy(
+										FireflyProjection::new(CypressVariable::Local(left))
+											.project(FireflyProjector::Parameter)
+									)
 								)],
 							),
 						}],

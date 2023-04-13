@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::label::{Label, LabelGenerator};
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
 			FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyType,
 		},
 	},
-	utility::{ignore::Ignore, slice::slice},
+	utility::ignore::Ignore,
 };
 
 struct Substitution(HashMap<Label, FireflyProjection>);
@@ -57,7 +57,7 @@ impl Substitute for FireflyOperation {
 			FireflyOperation::Pair(operands) => operands.iter_mut().map(|(_, operand)| operand.apply(substitution)).collect(),
 			FireflyOperation::Closure(procedure, snapshot) => {
 				procedure.apply(substitution);
-				snapshot.iter_mut().map(|x| x.apply(substitution)).collect()
+				snapshot.iter_mut().map(|(_, x)| x.apply(substitution)).collect()
 			},
 		}
 	}
@@ -279,7 +279,7 @@ pub fn hoist_ty(ty: CypressType) -> FireflyType {
 		CypressType::Unity => FireflyType::Unity,
 		CypressType::Polarity => FireflyType::Polarity,
 		CypressType::Integer => FireflyType::Integer,
-		CypressType::Power { domain, codomain } => FireflyType::Closure,
+		CypressType::Power { domain: _, codomain: _ } => FireflyType::Closure,
 		CypressType::Product(factors) => FireflyType::Product(
 			factors
 				.into_vec()
@@ -370,11 +370,16 @@ pub fn hoist_term(
 						binding: fixpoint_name,
 						operation: FireflyOperation::Closure(
 							FireflyOperand::Constant(FireflyPrimitive::Procedure(procedure_label)),
-							(0..free_variables.len())
-								.map(|i| {
-									FireflyOperand::Copy(
-										FireflyProjection::new(CypressVariable::Local(environment))
-											.project(FireflyProjector::Free(i)),
+							free_variables
+								.iter()
+								.enumerate()
+								.map(|(i, (_, ty))| {
+									(
+										hoist_ty(ty.clone()),
+										FireflyOperand::Copy(
+											FireflyProjection::new(CypressVariable::Local(environment))
+												.project(FireflyProjector::Free(i)),
+										),
 									)
 								})
 								.collect::<Vec<_>>()
@@ -402,7 +407,12 @@ pub fn hoist_term(
 			{
 				let captures = free_variables
 					.into_iter()
-					.map(|(variable, _)| FireflyOperand::Copy(FireflyProjection::new(CypressVariable::Local(variable))))
+					.map(|(variable, ty)| {
+						(
+							hoist_ty(ty),
+							FireflyOperand::Copy(FireflyProjection::new(CypressVariable::Local(variable))),
+						)
+					})
 					.collect::<Vec<_>>()
 					.into_boxed_slice();
 

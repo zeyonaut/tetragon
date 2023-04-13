@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::Hash, sync::Arc};
+use std::hash::Hash;
 
 use crate::{translator::label::Label, utility::slice::Slice};
 

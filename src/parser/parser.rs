@@ -230,6 +230,9 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 				[Tx(Asterisk), Tx(OpenParen), Nx(Node::TypeList(list)), Tx(CloseParen)] => {
 					Node::Type(ParsedType::Product(list))
 				},
+				[Tx(OpenOrtho), Nx(Node::Type(ty)), Tx(CloseOrtho)] => {
+					Node::Type(ty)
+				},
 				_ => Node::Fail,
 			}
 		},
@@ -298,6 +301,7 @@ impl Parser {
 			DelimitedType => [
 				[!Name],
 				[!Asterisk, !OpenParen, @TypeList, !CloseParen],
+				[!OpenOrtho, @Type, !CloseOrtho],
 			]
 			TypeList => [
 				[],
