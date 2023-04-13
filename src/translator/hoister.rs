@@ -102,6 +102,7 @@ impl Substitute for FireflyTerm {
 			} => scrutinee.apply(substitution),
 			FireflyTerminator::Apply {
 				procedure,
+				domain: _,
 				codomain: _,
 				snapshot,
 				continuation_label: _,
@@ -109,6 +110,7 @@ impl Substitute for FireflyTerm {
 			} => [procedure, snapshot, argument].map(|x| x.apply(substitution)).ignore(),
 			FireflyTerminator::Jump {
 				continuation_label: _,
+				domain: _,
 				argument,
 			} => argument.apply(substitution),
 		}
@@ -342,8 +344,8 @@ pub fn hoist_term(
 
 			// Generate a procedure.
 			{
-				let substitution = Substitution(
-					free_variables
+				let substitution = Substitution({
+					let mut mapping = free_variables
 						.iter()
 						.cloned()
 						.enumerate()
@@ -353,8 +355,13 @@ pub fn hoist_term(
 								FireflyProjection::new(CypressVariable::Local(environment)).project(FireflyProjector::Free(i)),
 							)
 						})
-						.collect::<HashMap<_, _>>(),
-				);
+						.collect::<HashMap<_, _>>();
+					mapping.insert(
+						parameter,
+						FireflyProjection::new(CypressVariable::Local(parameter)).project(FireflyProjector::Parameter),
+					);
+					mapping
+				});
 
 				let mut body = hoist_term(*body, procedures, symbol_generator).subbing(&substitution);
 
@@ -439,7 +446,7 @@ pub fn hoist_term(
 		}),
 		CypressTerm::Apply {
 			function,
-			domain: _,
+			domain,
 			codomain,
 			continuation,
 			argument,
@@ -447,6 +454,7 @@ pub fn hoist_term(
 			let function_projection = hoist_projection(function);
 			FireflyTerm::new(FireflyTerminator::Apply {
 				procedure: FireflyOperand::Copy(function_projection.clone().project(FireflyProjector::Procedure)),
+				domain: hoist_ty(domain),
 				codomain: hoist_ty(codomain),
 				snapshot: FireflyOperand::Copy(function_projection.project(FireflyProjector::Snapshot)),
 				continuation_label: continuation,
@@ -454,11 +462,12 @@ pub fn hoist_term(
 			})
 		},
 		CypressTerm::Continue {
-			domain: _,
+			domain,
 			continuation_label,
 			argument,
 		} => FireflyTerm::new(FireflyTerminator::Jump {
 			continuation_label,
+			domain: hoist_ty(domain),
 			argument: FireflyOperand::Copy(hoist_projection(argument)),
 		}),
 	}

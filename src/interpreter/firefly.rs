@@ -8,6 +8,7 @@ use crate::{
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum FireflyProjector {
+	Parameter,
 	Field(usize),
 	Free(usize),
 	Procedure,
@@ -167,6 +168,7 @@ pub enum FireflyTerminator {
 	},
 	Apply {
 		procedure: FireflyOperand,
+		domain: FireflyType,
 		codomain: FireflyType,
 		snapshot: FireflyOperand,
 		continuation_label: Option<Label>,
@@ -174,6 +176,7 @@ pub enum FireflyTerminator {
 	},
 	Jump {
 		continuation_label: Option<Label>,
+		domain: FireflyType,
 		argument: FireflyOperand,
 	},
 }
@@ -263,6 +266,7 @@ impl FireflyProgram {
 				},
 				FireflyTerminator::Apply {
 					procedure,
+					domain: _,
 					codomain: _,
 					snapshot,
 					continuation_label,
@@ -294,6 +298,7 @@ impl FireflyProgram {
 				},
 				FireflyTerminator::Jump {
 					continuation_label,
+					domain: _,
 					argument,
 				} => {
 					if let Some(label) = continuation_label {
@@ -337,12 +342,16 @@ impl FireflyProgram {
 										FireflyOperand::Copy(
 											FireflyProjection::new(CypressVariable::Local(environment)).project(left_inner),
 										),
-										FireflyOperand::Copy(FireflyProjection::new(CypressVariable::Local(right))),
+										FireflyOperand::Copy(
+											FireflyProjection::new(CypressVariable::Local(right))
+												.project(FireflyProjector::Parameter),
+										),
 									],
 								),
 							}],
 							terminator: FireflyTerminator::Jump {
 								continuation_label: None,
+								domain: FireflyType::Integer,
 								argument: FireflyOperand::Copy(FireflyProjection::new(CypressVariable::Local(output))),
 							},
 						},
@@ -363,11 +372,14 @@ impl FireflyProgram {
 							binding: add_inner_closure,
 							operation: FireflyOperation::Closure(
 								FireflyOperand::Constant(FireflyPrimitive::Procedure(add_inner)),
-								slice![FireflyOperand::Copy(FireflyProjection::new(CypressVariable::Local(left)))],
+								slice![FireflyOperand::Copy(
+									FireflyProjection::new(CypressVariable::Local(left)).project(FireflyProjector::Parameter)
+								)],
 							),
 						}],
 						terminator: FireflyTerminator::Jump {
 							continuation_label: None,
+							domain: FireflyType::Closure,
 							argument: FireflyOperand::Copy(FireflyProjection::new(CypressVariable::Local(add_inner_closure))),
 						},
 					},
@@ -397,10 +409,12 @@ impl FireflyProgram {
 								[
 									FireflyOperand::Copy(
 										FireflyProjection::new(CypressVariable::Local(input))
+											.project(FireflyProjector::Parameter)
 											.project(FireflyProjector::Field(0)),
 									),
 									FireflyOperand::Copy(
 										FireflyProjection::new(CypressVariable::Local(input))
+											.project(FireflyProjector::Parameter)
 											.project(FireflyProjector::Field(1)),
 									),
 								],
@@ -408,6 +422,7 @@ impl FireflyProgram {
 						}],
 						terminator: FireflyTerminator::Jump {
 							continuation_label: None,
+							domain: FireflyType::Integer,
 							argument: FireflyOperand::Copy(FireflyProjection::new(CypressVariable::Local(output))),
 						},
 					},
@@ -435,6 +450,9 @@ fn lookup(
 
 	for projector in &projection.projectors {
 		match projector {
+			FireflyProjector::Parameter => {
+				continue;
+			},
 			FireflyProjector::Field(index) => {
 				value = if let FireflyValue::Tuple(parts) = value {
 					parts.get(*index)?.clone()

@@ -16,7 +16,7 @@ pub enum NASMDefinition {
 	ASCII(String),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NASMRegister8 {
 	AL,
 }
@@ -30,7 +30,7 @@ impl core::fmt::Display for NASMRegister8 {
 	}
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NASMRegister64 {
 	RAX, // Return Value
 	RCX, // Argument/Pointer to Argument
@@ -175,56 +175,82 @@ impl StackFrame {
 	}
 
 	//pub fn get_field(&self, projection: &FireflyProjection) -> Option<(FireflyType, u32)> {
-	pub fn get_field(
+	pub fn load<const IS_BY_VALUE: bool>(
 		&self,
+		destination: NASMRegister64,
 		projection: &FireflyProjection,
-	) -> Option<(/*Vec<NASMInstruction>, */ FireflyType, NASMRegister64, i32)> {
+		instructions: &mut Vec<NASMInstruction>,
+	) {
+		use NASMInstruction::*;
 		use NASMRegister64::*;
 		match projection.root {
 			CypressVariable::Local(local) => {
-				let (mut ty, mut offset) = self.get(&local)?;
-				let mut register = RBP;
+				let (mut ty, mut offset) = self.get(&local).unwrap();
+				let mut source = RBP;
 
 				for projector in &projection.projectors {
 					match projector {
+						FireflyProjector::Parameter => {
+							let size = size_of_ty(&ty);
+							if size <= 8 {
+								()
+							} else {
+								instructions.push(MovFromAddress(destination, (source, offset)));
+								source = destination;
+								offset = 0;
+							}
+						},
 						FireflyProjector::Field(i) => {
 							if let FireflyType::Product(factors) = ty {
-								ty = factors.get(*i)?.clone();
+								ty = factors.get(*i).unwrap().clone();
 								offset += factors.iter().take(*i).fold(0, |acc, ty| acc + size_of_ty(ty) as i32);
 							} else {
-								return None;
+								panic!("failed to get field from stack frame");
 							}
 						},
 						FireflyProjector::Free(i) => {
 							if let FireflyType::Snapshot(factors) = ty {
-								ty = factors.get(*i)?.clone();
+								// TODO: Use dereference.
+								ty = factors.get(*i).unwrap().clone();
 								offset += factors.iter().take(*i).fold(0, |acc, ty| acc + size_of_ty(ty) as i32);
 							} else {
-								return None;
+								panic!("failed to get field from stack frame");
 							}
 						},
 						FireflyProjector::Procedure => {
 							if let FireflyType::Closure = ty {
 								ty = FireflyType::Procedure;
+								continue;
 							} else {
-								return None;
+								panic!("failed to get field from stack frame");
 							}
 						},
 						FireflyProjector::Snapshot => {
 							if let FireflyType::Closure = ty {
+								// TODO: We need this to have an actual type.
+								// TODO: Use dereference.
 								ty = FireflyType::Snapshot(slice![]);
 								offset += 8;
 							} else {
-								return None;
+								panic!("failed to get field from stack frame");
 							}
 						},
 						FireflyProjector::Dereference => unimplemented!(),
 					}
 				}
 
-				Some((ty, register, offset))
+				if IS_BY_VALUE {
+					instructions.push(MovFromAddress(destination, (source, offset)))
+				} else {
+					if destination != source {
+						instructions.push(MovFromReg(destination, source));
+					}
+					if offset != 0 {
+						instructions.push(AddFromI32(destination, offset));
+					}
+				}
 			},
-			_ => None, // TODO: This would need a different return type, and wouldn't be relative to the frame pointer.
+			_ => (), // TODO: Not on stack?
 		}
 	}
 
@@ -438,9 +464,6 @@ pub fn emit_statement(
 				let var = stack_frame.allocate(binding.clone(), ty.clone());
 				match operand {
 					FireflyOperand::Copy(projection) => {
-						let (_, reg, offset) = stack_frame
-							.get_field(projection)
-							.expect("failed to get field from stack frame");
 						let size = size_of_ty(&ty);
 						if size == 0 {
 							()
@@ -448,13 +471,12 @@ pub fn emit_statement(
 							// getfield can return a list of instructions, a register to find an address in, and an immediate offset.
 							// that way, we can use a MovFromDeref with the pair...
 							// but we should give it a register to populate in the first place so we can control it to be RAX or whatever as a temporary register if not using RBP.
-							instructions.push(MovFromAddress(RAX, (reg, offset)));
+							stack_frame.load::<true>(RAX, projection, instructions);
 							instructions.push(MovIntoAddress((RBP, var), RAX));
 						} else {
 							// or movfromreg the register, then a sub/add.
+							stack_frame.load::<false>(RSI, projection, instructions);
 							instructions.extend([
-								MovFromReg(RSI, reg),
-								AddFromI32(RSI, offset),
 								MovFromReg(RDI, RBP),
 								AddFromI32(RDI, var),
 								MovFromU64(RCX, u64::from(size)),
@@ -486,10 +508,10 @@ pub fn emit_statement(
 				fn push_addition(instructions: &mut Vec<NASMInstruction>, operand: &FireflyOperand, stack_frame: &StackFrame) {
 					match operand {
 						FireflyOperand::Copy(projection) => {
-							let (_, reg, offset) = stack_frame
-								.get_field(projection)
-								.expect("failed to get field from stack frame");
-							instructions.push(AddFromAddress(RAX, (reg, offset)));
+							// TODO: this is inefficient, as it doesn't need to use R10 unless some dereference takes place along the way. Even so, it can still leave off the last mov, adding directly using register + offset.
+							// NOTE: One way to fix this might be to return a (destination, source, offset) pair. Then, we can use three separate functions for either emitting a by-value mov, a by-value add, or a by-reference mov.
+							stack_frame.load::<true>(R10, projection, instructions);
+							instructions.push(AddFromReg(RAX, R10));
 						},
 						FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
 							instructions.push(MovFromI64(R10, *n));
@@ -518,11 +540,7 @@ pub fn emit_statement(
 					) {
 						match operand {
 							FireflyOperand::Copy(projection) => {
-								let (_, reg, offset) = stack_frame
-									.get_field(projection)
-									.expect("failed to get field from stack frame");
-
-								instructions.push(MovFromAddress(register, (reg, offset)));
+								stack_frame.load::<true>(register, projection, instructions);
 							},
 							FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
 								instructions.push(MovFromI64(register, *n));
@@ -564,19 +582,14 @@ pub fn emit_statement(
 					let size = size_of_ty(&ty);
 					match operand {
 						FireflyOperand::Copy(projection) => {
-							let (_, reg, offset) = stack_frame
-								.get_field(projection)
-								.expect("failed to get field from stack frame");
-
 							if size == 0 {
 								()
 							} else if size == 8 {
-								instructions.push(MovFromAddress(RAX, (reg, offset)));
+								stack_frame.load::<true>(RAX, projection, instructions);
 								instructions.push(MovIntoAddress((RBP, var + pigeonhole), RAX));
 							} else {
+								stack_frame.load::<false>(RSI, projection, instructions);
 								instructions.extend([
-									MovFromReg(RSI, RBP),
-									AddFromI32(RSI, offset),
 									MovFromReg(RDI, RBP),
 									AddFromI32(RDI, var + pigeonhole),
 									MovFromU64(RCX, u64::from(size)),
@@ -610,11 +623,7 @@ pub fn emit_statement(
 
 				match procedure {
 					FireflyOperand::Copy(projection) => {
-						let (_, reg, offset) = stack_frame
-							.get_field(projection)
-							.expect("failed to get field from stack frame");
-
-						instructions.push(MovFromAddress(RAX, (reg, offset)));
+						stack_frame.load::<true>(RAX, projection, instructions);
 						instructions.push(MovIntoAddress((RBP, proc_var), RAX));
 					},
 					FireflyOperand::Constant(primitive) => match primitive {
@@ -664,12 +673,7 @@ pub fn emit_terminator(
 		} => {
 			match scrutinee {
 				FireflyOperand::Copy(projection) => {
-					let (_, reg, offset) = stack_frame
-						.get_field(projection)
-						.unwrap_or_else(|| panic!("failed to get {:#?}", projection));
-					//.expect("failed to get field from stack frame");
-
-					instructions.push(MovFromAddress(RAX, (reg, offset)));
+					stack_frame.load::<true>(RAX, projection, instructions);
 				},
 				FireflyOperand::Constant(FireflyPrimitive::Polarity(b)) => {
 					instructions.push(MovFromI64(RAX, *b as i64));
@@ -686,6 +690,7 @@ pub fn emit_terminator(
 		},
 		FireflyTerminator::Apply {
 			procedure,
+			domain,
 			codomain,
 			snapshot,
 			continuation_label,
@@ -702,11 +707,7 @@ pub fn emit_terminator(
 			};
 			let procedure_label = match procedure {
 				FireflyOperand::Copy(projection) => {
-					let (ty, reg, offset) = stack_frame
-						.get_field(projection)
-						.expect("failed to get field from stack frame");
-					let size = size_of_ty(&ty);
-					instructions.push(MovFromAddress(RAX, (reg, offset)));
+					stack_frame.load::<true>(RAX, projection, instructions);
 					None
 				},
 				FireflyOperand::Constant(primitive) => match primitive {
@@ -716,16 +717,13 @@ pub fn emit_terminator(
 			};
 			match argument {
 				FireflyOperand::Copy(projection) => {
-					let (ty, reg, offset) = stack_frame
-						.get_field(projection)
-						.expect("failed to get field from stack frame");
-					let size = size_of_ty(&ty);
+					let size = size_of_ty(domain);
 					if size == 0 {
 						()
 					} else if size == 8 {
-						instructions.push(MovFromAddress(RCX, (reg, offset)));
+						stack_frame.load::<true>(RCX, projection, instructions);
 					} else {
-						instructions.extend([MovFromReg(RCX, reg), AddFromI32(RCX, offset)])
+						stack_frame.load::<false>(RCX, projection, instructions);
 					}
 				},
 				FireflyOperand::Constant(primitive) => match primitive {
@@ -739,10 +737,7 @@ pub fn emit_terminator(
 			}
 			match snapshot {
 				FireflyOperand::Copy(projection) => {
-					let (ty, reg, offset) = stack_frame
-						.get_field(projection)
-						.expect("failed to get field from stack frame");
-					instructions.push(MovFromAddress(RDX, (reg, offset)));
+					stack_frame.load::<true>(RDX, projection, instructions);
 				},
 				FireflyOperand::Constant(primitive) => match primitive {
 					_ => panic!("bad snapshot primitive"),
@@ -782,13 +777,11 @@ pub fn emit_terminator(
 		},
 		FireflyTerminator::Jump {
 			continuation_label,
+			domain,
 			argument,
 		} => match argument {
 			FireflyOperand::Copy(projection) => {
-				let (ty, reg, offset) = stack_frame
-					.get_field(projection)
-					.expect("failed to get field from stack frame");
-				let size = size_of_ty(&ty);
+				let size = size_of_ty(&domain);
 
 				if let Some(continuation_label) = continuation_label {
 					let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
@@ -796,12 +789,11 @@ pub fn emit_terminator(
 					if size == 0 {
 						()
 					} else if size == 8 {
-						instructions.push(MovFromAddress(RAX, (reg, offset)));
+						stack_frame.load::<true>(RAX, projection, instructions);
 						instructions.push(MovIntoAddress((RBP, parameter), RAX));
 					} else {
+						stack_frame.load::<false>(RSI, projection, instructions);
 						instructions.extend([
-							MovFromReg(RSI, RBP),
-							AddFromI32(RSI, offset),
 							MovFromReg(RDI, RBP),
 							AddFromI32(RDI, parameter),
 							MovFromU64(RCX, u64::from(size)),
@@ -813,11 +805,10 @@ pub fn emit_terminator(
 					if size == 0 {
 						()
 					} else if size == 8 {
-						instructions.push(MovFromAddress(RAX, (reg, offset)));
+						stack_frame.load::<true>(RAX, projection, instructions);
 					} else if let Some(mailbox_offset) = mailbox_offset {
+						stack_frame.load::<false>(RSI, projection, instructions);
 						instructions.extend([
-							MovFromReg(RSI, reg),
-							AddFromI32(RSI, offset),
 							MovFromAddress(RDI, (RBP, mailbox_offset)),
 							MovFromU64(RCX, u64::from(size)),
 							RepMovsb,
