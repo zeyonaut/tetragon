@@ -105,12 +105,12 @@ fn main() {
 
 		let now = Instant::now();
 
-		let firefly_value = firefly_program.clone().evaluate();
+		//let firefly_value = firefly_program.clone().evaluate();
 
 		let elapsed = now.elapsed();
 
 		println!("Elapsed (Firefly): {:#?}", elapsed);
-		println!("Firefly value: {:#?}", firefly_value);
+		//println!("Firefly value: {:#?}", firefly_value);
 
 		let program = nasm_win64::emit_program(firefly_program).map(nasm_win64::emit_assembly);
 

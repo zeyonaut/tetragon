@@ -1,15 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::label::{Label, LabelGenerator};
 use crate::{
 	interpreter::{
 		cypress::CypressVariable,
 		firefly::{
-			BinaryOperator, FireflyOperand, FireflyOperation, FireflyPrimitive, FireflyProcedure, FireflyProgram,
-			FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyType,
+			ff_closure_type, BinaryOperator, FireflyOperand, FireflyOperation, FireflyPrimitive, FireflyProcedure,
+			FireflyProgram, FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyType,
 		},
 	},
-	utility::slice::slice,
+	utility::slice::{slice, Slice},
 };
 
 pub enum NASMDefinition {
@@ -37,8 +37,8 @@ pub enum NASMRegister64 {
 	RDX, // Pointer to Environment
 	R8,  // Pointer to Return Value
 	R9,
-	R10, // Temporary,
-	R11, // Temporary
+	R10, // Temporary Register
+	R11, // Cloning/Dropping Temporary Register
 	RSP,
 	RBP,
 	RSI,
@@ -68,6 +68,7 @@ impl core::fmt::Display for NASMRegister64 {
 pub enum NASMInstruction {
 	Jmp(String),
 	JNE(String),
+	JE(String),
 	PushReg(NASMRegister64),
 	PushLabel(String),
 	Pop(NASMRegister64),
@@ -76,6 +77,8 @@ pub enum NASMInstruction {
 	AddFromRBPMinus(NASMRegister64, u32),
 	AddFromAddress(NASMRegister64, (NASMRegister64, i32)),
 	AddFromReg(NASMRegister64, NASMRegister64),
+	AddSXIntoAddressFromI32((NASMRegister64, i32), i32),
+	SubSXIntoAddressFromI32((NASMRegister64, i32), i32),
 	SubFromU32(NASMRegister64, u32),
 	MovFromReg(NASMRegister64, NASMRegister64),
 	MovFromLabel(NASMRegister64, String),
@@ -89,10 +92,12 @@ pub enum NASMInstruction {
 	MovZXR64FromR8(NASMRegister64, NASMRegister8),
 	SetE(NASMRegister8),
 	CmpALWithU8(u8),
+	CmpWithU8(NASMRegister64, u8),
 	CmpReg(NASMRegister64, NASMRegister64),
 	RepMovsb,
 	CallReg(NASMRegister64),
 	CallLabel(String),
+	LocalLabel(String),
 	Leave,
 	Ret,
 }
@@ -103,6 +108,7 @@ impl NASMInstruction {
 		match self {
 			Jmp(label) => format!("jmp {label}"),
 			JNE(label) => format!("jne {label}"),
+			JE(label) => format!("je {label}"),
 			PushReg(reg) => format!("push {reg}"),
 			PushLabel(label) => format!("push {label}"),
 			Pop(reg) => format!("pop {reg}"),
@@ -111,6 +117,8 @@ impl NASMInstruction {
 			AddFromRBPMinus(reg, offset) => format!("add {reg}, [rbp - {offset}]"),
 			AddFromAddress(dst, (src, offset)) => format!("add {dst}, [{src} + {offset}]"),
 			AddFromReg(reg_dst, reg_src) => format!("add {reg_dst}, {reg_src}"),
+			AddSXIntoAddressFromI32((dst, offset), imm) => format!("add qword [{dst} + {offset}], {imm}"),
+			SubSXIntoAddressFromI32((dst, offset), imm) => format!("sub qword [{dst} + {offset}], {imm}"),
 			SubFromU32(reg, imm) => format!("sub {reg}, {imm}"),
 			MovFromReg(reg_dst, reg_src) => format!("mov {reg_dst}, {reg_src}"),
 			MovFromLabel(reg, label) => format!("mov {reg}, {label}"),
@@ -129,7 +137,9 @@ impl NASMInstruction {
 			MovZXR64FromR8(dst, src) => format!("movzx {dst}, {src}"),
 			SetE(dst) => format!("sete {dst}"),
 			CmpALWithU8(imm) => format!("cmp al, {imm}"),
+			CmpWithU8(reg, imm) => format!("cmp {reg}, {imm}"),
 			CmpReg(left, right) => format!("cmp {left}, {right}"),
+			LocalLabel(string) => format!("{string}:"),
 		}
 	}
 }
@@ -147,6 +157,9 @@ pub struct StackFrame {
 	label_to_offset_from_frame_pointer: HashMap<Label, (FireflyType, i32)>,
 	continuation_to_parameter: HashMap<Label, Label>,
 	current_frame_pointer_offset: i32,
+	// Used for checking what needs to be dropped at any given terminator (for reference counting).
+	current_visibles: HashSet<Label>,
+	continuation_to_visibles: HashMap<Label, HashSet<Label>>,
 }
 
 impl StackFrame {
@@ -155,6 +168,8 @@ impl StackFrame {
 			label_to_offset_from_frame_pointer: HashMap::new(),
 			continuation_to_parameter: HashMap::new(),
 			current_frame_pointer_offset: 0,
+			current_visibles: HashSet::new(),
+			continuation_to_visibles: HashMap::new(),
 		}
 	}
 
@@ -165,22 +180,161 @@ impl StackFrame {
 	}
 
 	pub fn allocate(&mut self, label: Label, ty: FireflyType) -> i32 {
+		self.current_visibles.insert(label.clone());
+
 		self.current_frame_pointer_offset -= size_of_ty(&ty) as i32;
 		self.label_to_offset_from_frame_pointer
 			.insert(label, (ty, self.current_frame_pointer_offset));
 		self.current_frame_pointer_offset
 	}
 
-	pub fn allocate_phi(&mut self, continuation: Label, parameter: Label, ty: FireflyType) -> i32 {
+	// Returns the labels visible before the phi node was allocated.
+	pub fn allocate_phi(&mut self, continuation: Label, parameter: Label, ty: FireflyType) -> HashSet<Label> {
+		let current_visibles = self.current_visibles.clone();
+		self.continuation_to_visibles.insert(continuation, current_visibles.clone());
 		self.continuation_to_parameter.insert(continuation, parameter.clone());
-		self.allocate(parameter, ty)
+		self.allocate(parameter.clone(), ty);
+		current_visibles
 	}
 
 	pub fn get(&self, label: &Label) -> Option<(FireflyType, i32)> {
 		self.label_to_offset_from_frame_pointer.get(&label).cloned()
 	}
 
-	pub fn load<const IS_BY_VALUE: bool>(
+	fn emit_drop(
+		&self,
+		ty: FireflyType,
+		projection: &FireflyProjection,
+		instructions: &mut Vec<NASMInstruction>,
+		symbol_generator: &mut LabelGenerator,
+	) {
+		use NASMInstruction::*;
+		use NASMRegister64::*;
+		match ty {
+			FireflyType::Product(factors) => {
+				for (i, factor) in factors.into_vec().into_iter().enumerate() {
+					self.emit_drop(
+						factor,
+						&projection.clone().project(FireflyProjector::Field(i)),
+						instructions,
+						symbol_generator,
+					)
+				}
+			},
+			FireflyType::Snapshot(Some(requisites)) => {
+				if requisites.len() > 0 {
+					self.emit_load::<true>(RCX, projection, instructions);
+					instructions.push(CallLabel("drop_rc".to_owned()));
+				}
+			},
+			_ => (),
+		}
+	}
+
+	pub fn emit_drops(
+		&self,
+		continuation: Option<Label>,
+		instructions: &mut Vec<NASMInstruction>,
+		symbol_generator: &mut LabelGenerator,
+	) {
+		let mut droppables = self.current_visibles.clone();
+		if let Some(undroppables) =
+			continuation.map(|continuation| self.continuation_to_visibles.get(&continuation).unwrap().clone())
+		{
+			for undroppable in undroppables {
+				droppables.remove(&undroppable);
+			}
+		}
+
+		for droppable in droppables {
+			let (ty, _) = self.get(&droppable).unwrap();
+			self.emit_drop(
+				ty,
+				&FireflyProjection::new(CypressVariable::Local(droppable)),
+				instructions,
+				symbol_generator,
+			);
+		}
+	}
+
+	fn emit_clone(
+		&self,
+		symbol_generator: &mut LabelGenerator,
+		ty: FireflyType,
+		projection: &FireflyProjection,
+		instructions: &mut Vec<NASMInstruction>,
+	) {
+		use NASMInstruction::*;
+		use NASMRegister64::*;
+		match ty {
+			FireflyType::Product(factors) => {
+				for (i, factor) in factors.into_vec().into_iter().enumerate() {
+					self.emit_clone(
+						symbol_generator,
+						factor,
+						&projection.clone().project(FireflyProjector::Field(i)),
+						instructions,
+					)
+				}
+			},
+			FireflyType::Snapshot(_) => {
+				// We increment the reference counter.
+				let [skip_clone] = symbol_generator.fresh();
+
+				self.emit_load::<true>(R11, projection, instructions);
+				instructions.extend([
+					CmpWithU8(R11, 0),
+					JE(emit_block_local_label(skip_clone)),
+					AddSXIntoAddressFromI32((R11, 0), 1),
+					LocalLabel(emit_block_local_label(skip_clone)),
+				]);
+			},
+			_ => (),
+		}
+	}
+
+	pub fn emit_clones(
+		&self,
+		symbol_generator: &mut LabelGenerator,
+		operand: &FireflyOperand,
+		instructions: &mut Vec<NASMInstruction>,
+	) {
+		match operand {
+			FireflyOperand::Copy(projection) => {
+				if let CypressVariable::Local(local) = &projection.root {
+					let (mut ty, _) = self.get(local).unwrap();
+
+					for projector in &projection.projectors {
+						match projector {
+							FireflyProjector::Parameter => continue,
+							FireflyProjector::Field(n) => {
+								if let FireflyType::Product(factors) = ty {
+									ty = factors.get(*n).unwrap().clone();
+								} else {
+									panic!();
+								}
+							},
+							FireflyProjector::Free(n) => {
+								if let FireflyType::Snapshot(Some(requisites)) = ty {
+									ty = requisites.get(*n).unwrap().clone();
+								} else {
+									panic!();
+								}
+							},
+							FireflyProjector::Dereference => unimplemented!(),
+						}
+					}
+
+					self.emit_clone(symbol_generator, ty, projection, instructions);
+				} else {
+					unimplemented!();
+				}
+			},
+			FireflyOperand::Constant(_) => (),
+		}
+	}
+
+	pub fn emit_load<const IS_BY_VALUE: bool>(
 		&self,
 		destination: NASMRegister64,
 		projection: &FireflyProjection,
@@ -214,32 +368,17 @@ impl StackFrame {
 							}
 						},
 						FireflyProjector::Free(i) => {
-							if let FireflyType::Snapshot(factors) = ty {
+							if let FireflyType::Snapshot(Some(factors)) = ty {
 								instructions.push(MovFromAddress(destination, (source, offset)));
 								source = destination;
+								offset = 0;
 								// We leave space for the reference count.
-								offset = 8;
+								offset += 8;
+								// We leave space for the destructor.
+								offset += 8;
 
 								ty = factors.get(*i).unwrap().clone();
 								offset += factors.iter().take(*i).fold(0, |acc, ty| acc + size_of_ty(ty) as i32);
-							} else {
-								panic!("failed to get field from stack frame");
-							}
-						},
-						FireflyProjector::Procedure => {
-							if let FireflyType::Closure = ty {
-								ty = FireflyType::Procedure;
-								continue;
-							} else {
-								panic!("failed to get field from stack frame");
-							}
-						},
-						FireflyProjector::Snapshot => {
-							if let FireflyType::Closure = ty {
-								// FIXME: We need this to have an actual type. Unknown, I guess.
-								// TODO: Use dereference.
-								ty = FireflyType::Snapshot(slice![]);
-								offset += 8;
 							} else {
 								panic!("failed to get field from stack frame");
 							}
@@ -259,9 +398,7 @@ impl StackFrame {
 					}
 				}
 			},
-			CypressVariable::Global(ref test) => {
-				println!("{test}")
-			},
+			CypressVariable::Global(ref test) => unimplemented!(),
 		}
 	}
 
@@ -321,8 +458,18 @@ pub fn emit_program(program: FireflyProgram) -> Option<Vec<NASMProcedure>> {
 	let mut procedures = Vec::new();
 	let mut globals = HashMap::new();
 
+	let mut destructors = HashMap::new();
+
+	procedures.push(emit_drop_snapshot());
+
+	for (_, ff_procedure) in &ff_procedures {
+		if let Some((_, requisites)) = &ff_procedure.capture {
+			emit_destructor(&mut symbol_generator, &mut procedures, &mut destructors, requisites.clone());
+		}
+	}
+
 	for (&label, ff_procedure) in &ff_procedures {
-		procedures.push(emit_procedure(&mut symbol_generator, label, ff_procedure)?);
+		procedures.push(emit_procedure(&mut symbol_generator, &destructors, label, ff_procedure)?);
 	}
 
 	procedures.push(emit_main(ff_entry, &mut globals));
@@ -358,8 +505,113 @@ pub fn emit_main(entry: Label, globals: &mut HashMap<String, NASMDefinition>) ->
 	}
 }
 
+pub fn emit_drop_snapshot() -> NASMProcedure {
+	use NASMInstruction::*;
+	use NASMRegister64::*;
+
+	let stack_size = 8;
+	let stack_shadow = 32;
+	let stack_padding = (16 - ((stack_size + 8) % 16)) % 16;
+
+	NASMProcedure {
+		label: "drop_rc".to_owned(),
+		entry: vec![
+			CmpWithU8(RAX, 0),
+			JNE(".return".to_owned()),
+			PushReg(RBP),
+			MovFromReg(RBP, RSP),
+			SubFromU32(RSP, stack_size + stack_shadow + stack_padding),
+			MovIntoAddressFromReg((RBP, -8), RCX),
+			SubSXIntoAddressFromI32((RCX, 0), 1),
+			MovFromAddress(RAX, (RCX, 0)),
+			CmpWithU8(RAX, 0),
+			JNE(".skip".to_owned()),
+			MovFromAddress(RAX, (RCX, 8)),
+			MovFromReg(RCX, RCX),
+			CallReg(RAX),
+			MovFromAddress(RCX, (RBP, -8)),
+			CallLabel("free".to_owned()),
+			LocalLabel(".skip".to_owned()),
+			Leave,
+			LocalLabel(".return".to_owned()),
+			Ret,
+		],
+		block_stack: vec![],
+	}
+}
+
+pub fn emit_destructor(
+	symbol_generator: &mut LabelGenerator,
+	procedures: &mut Vec<NASMProcedure>,
+	destructors: &mut HashMap<Slice<FireflyType>, String>,
+	requisites: Slice<FireflyType>,
+) {
+	use NASMInstruction::*;
+	use NASMRegister64::*;
+
+	let stack_size = 8;
+	let stack_shadow = 32;
+	let stack_padding = (16 - ((stack_size + 8) % 16)) % 16;
+
+	if !destructors.contains_key(&requisites) {
+		let [destructor_label] = symbol_generator.fresh();
+		let destroy_label = emit_destroy_label(destructor_label);
+		destructors.insert(requisites.clone(), destroy_label.clone());
+		let mut instructions = vec![
+			PushReg(RBP),
+			MovFromReg(RBP, RSP),
+			SubFromU32(RSP, stack_size + stack_shadow + stack_padding),
+			MovIntoAddressFromReg((RBP, -8), RCX),
+		];
+
+		let mut offset = 8 + 8;
+		for ty in requisites.into_vec().into_iter() {
+			let size = size_of_ty(&ty);
+
+			emit_destructor_drop(symbol_generator, offset, ty, &mut instructions);
+
+			offset += size;
+		}
+
+		instructions.extend([Leave, Ret]);
+
+		procedures.push(NASMProcedure {
+			label: destroy_label,
+			entry: instructions,
+			block_stack: Vec::new(),
+		})
+	}
+}
+
+fn emit_destructor_drop(
+	symbol_generator: &mut LabelGenerator,
+	mut offset: u32,
+	ty: FireflyType,
+	instructions: &mut Vec<NASMInstruction>,
+) {
+	use NASMInstruction::*;
+	use NASMRegister64::*;
+
+	match ty {
+		FireflyType::Product(factors) => {
+			for factor in factors.into_vec().into_iter() {
+				let size = size_of_ty(&factor);
+				emit_destructor_drop(symbol_generator, offset, factor, instructions);
+				offset += size;
+			}
+		},
+		FireflyType::Snapshot(_) => instructions.extend([
+			MovFromAddress(RCX, (RBP, -8)),
+			AddFromU32(RCX, offset),
+			CallLabel("drop_rc".to_owned()),
+		]),
+		_ => (),
+	}
+}
+
 pub fn emit_procedure(
 	symbol_generator: &mut LabelGenerator,
+	destructors: &HashMap<Slice<FireflyType>, String>,
 	label: Label,
 	procedure: &FireflyProcedure,
 ) -> Option<NASMProcedure> {
@@ -374,11 +626,19 @@ pub fn emit_procedure(
 		None
 	};
 
+	// NOTE: The only procedure without a capture is the entry procedure.
+	// A procedure must have a capture in order to be applied as a closure.
+	// If not, then the (even if empty) snapshot allocated for it will not be freed.
+	// To allow 'clean' procedure calls, we need a separate application terminator that doesn't allocate a snapshot
+	// at all (and emit them as appropriate in the hoisting phase).
 	let capture_parameter_offset = if let Some((capture_parameter, capture_requisites)) = &procedure.capture {
 		if capture_requisites.len() == 0 {
 			None
 		} else {
-			Some(stack_frame.allocate(capture_parameter.clone(), FireflyType::Snapshot(capture_requisites.clone())))
+			Some(stack_frame.allocate(
+				capture_parameter.clone(),
+				FireflyType::Snapshot(Some(capture_requisites.clone())),
+			))
 		}
 	} else {
 		None
@@ -387,17 +647,27 @@ pub fn emit_procedure(
 	let codomain_size = size_of_ty(&procedure.codomain);
 	let [mailbox] = symbol_generator.fresh();
 	let mailbox_offset = if codomain_size > 8 {
-		Some(stack_frame.allocate(mailbox.clone(), procedure.codomain.clone()))
+		Some(stack_frame.allocate(mailbox.clone(), FireflyType::Integer)) // FIXME: This is not technically an integer, but a raw pointer.
 	} else {
 		None
 	};
 
-	let entry = emit_term(&mut block_stack, &mut stack_frame, mailbox_offset, &procedure.body)?;
+	let entry = emit_term(
+		&destructors,
+		&mut block_stack,
+		&mut stack_frame,
+		mailbox_offset,
+		&procedure.body,
+		symbol_generator,
+	)?;
 
 	let stack_size = stack_frame.size();
 	let stack_shadow = 32;
 	let stack_padding = (16 - ((stack_size + 8) % 16)) % 16;
 
+	// FIXME: We're actually obligated to preserve RSI and RDI here.
+	// We could do this at the use sites of RSI and RDI, though.
+	// Alternatively, we can store a list of registers we've used and append to the prologue/epilogue as necessary.
 	let mut prologue = Vec::from([
 		PushReg(RBP),
 		MovFromReg(RBP, RSP),
@@ -437,18 +707,35 @@ pub fn emit_procedure(
 }
 
 pub fn emit_term(
+	destructors: &HashMap<Slice<FireflyType>, String>,
 	block_stack: &mut Vec<NASMBlock>,
 	stack_frame: &mut StackFrame,
 	mailbox_offset: Option<i32>,
 	term: &FireflyTerm,
+	symbol_generator: &mut LabelGenerator,
 ) -> Option<Vec<NASMInstruction>> {
 	let mut instructions = Vec::new();
 
 	for statement in term.statements.iter().rev() {
-		emit_statement(block_stack, mailbox_offset, statement, &mut instructions, stack_frame)
+		emit_statement(
+			destructors,
+			block_stack,
+			mailbox_offset,
+			statement,
+			&mut instructions,
+			stack_frame,
+			symbol_generator,
+		)
 	}
 
-	emit_terminator(mailbox_offset, &term.terminator, &mut instructions, stack_frame);
+	emit_terminator(
+		destructors,
+		mailbox_offset,
+		&term.terminator,
+		&mut instructions,
+		stack_frame,
+		symbol_generator,
+	);
 
 	Some(instructions)
 }
@@ -457,12 +744,18 @@ pub fn emit_block_local_label(label: Label) -> String {
 	["._", label.handle().to_string().as_str()].concat()
 }
 
+pub fn emit_destroy_label(label: Label) -> String {
+	["_destroy_", label.handle().to_string().as_str()].concat()
+}
+
 pub fn emit_statement(
+	destructors: &HashMap<Slice<FireflyType>, String>,
 	block_stack: &mut Vec<NASMBlock>,
 	mailbox_offset: Option<i32>,
 	statement: &FireflyStatement,
 	instructions: &mut Vec<NASMInstruction>,
 	stack_frame: &mut StackFrame,
+	symbol_generator: &mut LabelGenerator,
 ) {
 	use NASMInstruction::*;
 	use NASMRegister64::*;
@@ -470,6 +763,8 @@ pub fn emit_statement(
 	match statement {
 		FireflyStatement::Assign { binding, operation } => match operation {
 			FireflyOperation::Id(ty, operand) => {
+				stack_frame.emit_clones(symbol_generator, operand, instructions);
+
 				let var = stack_frame.allocate(binding.clone(), ty.clone());
 				match operand {
 					FireflyOperand::Copy(projection) => {
@@ -477,10 +772,10 @@ pub fn emit_statement(
 						if size == 0 {
 							()
 						} else if size == 8 {
-							stack_frame.load::<true>(RAX, projection, instructions);
+							stack_frame.emit_load::<true>(RAX, projection, instructions);
 							instructions.push(MovIntoAddressFromReg((RBP, var), RAX));
 						} else {
-							stack_frame.load::<false>(RSI, projection, instructions);
+							stack_frame.emit_load::<false>(RSI, projection, instructions);
 							instructions.extend([
 								MovFromReg(RDI, RBP),
 								AddFromI32(RDI, var),
@@ -515,7 +810,7 @@ pub fn emit_statement(
 						FireflyOperand::Copy(projection) => {
 							// TODO: this is inefficient, as it doesn't need to use R10 unless some dereference takes place along the way. Even so, it can still leave off the last mov, adding directly using register + offset.
 							// NOTE: One way to fix this might be to return a (destination, source, offset) pair. Then, we can use three separate functions for either emitting a by-value mov, a by-value add, or a by-reference mov.
-							stack_frame.load::<true>(R10, projection, instructions);
+							stack_frame.emit_load::<true>(R10, projection, instructions);
 							instructions.push(AddFromReg(RAX, R10));
 						},
 						FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
@@ -545,7 +840,7 @@ pub fn emit_statement(
 						match operand {
 							FireflyOperand::Copy(projection) => {
 								// NOTE: We currently do not support equality queries for oversized values, so this works fine for now.
-								stack_frame.load::<true>(register, projection, instructions);
+								stack_frame.emit_load::<true>(register, projection, instructions);
 							},
 							FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
 								instructions.push(MovFromI64(register, *n));
@@ -577,6 +872,10 @@ pub fn emit_statement(
 				}
 			},
 			FireflyOperation::Pair(fields) => {
+				for (_, operand) in fields.iter() {
+					stack_frame.emit_clones(symbol_generator, operand, instructions);
+				}
+
 				let var = stack_frame.allocate(
 					binding.clone(),
 					FireflyType::Product(fields.iter().map(|(ty, _)| ty.clone()).collect::<Vec<_>>().into_boxed_slice()),
@@ -590,10 +889,10 @@ pub fn emit_statement(
 							if size == 0 {
 								()
 							} else if size == 8 {
-								stack_frame.load::<true>(RAX, projection, instructions);
+								stack_frame.emit_load::<true>(RAX, projection, instructions);
 								instructions.push(MovIntoAddressFromReg((RBP, var + pigeonhole), RAX));
 							} else {
-								stack_frame.load::<false>(RSI, projection, instructions);
+								stack_frame.emit_load::<false>(RSI, projection, instructions);
 								instructions.extend([
 									MovFromReg(RDI, RBP),
 									AddFromI32(RDI, var + pigeonhole),
@@ -622,13 +921,17 @@ pub fn emit_statement(
 				}
 			},
 			FireflyOperation::Closure(procedure, captures) => {
-				let var = stack_frame.allocate(binding.clone(), FireflyType::Closure);
+				for (_, operand) in captures.iter() {
+					stack_frame.emit_clones(symbol_generator, operand, instructions);
+				}
+
+				let var = stack_frame.allocate(binding.clone(), ff_closure_type());
 
 				let proc_var = var;
 
 				match procedure {
 					FireflyOperand::Copy(projection) => {
-						stack_frame.load::<true>(RAX, projection, instructions);
+						stack_frame.emit_load::<true>(RAX, projection, instructions);
 						instructions.push(MovIntoAddressFromReg((RBP, proc_var), RAX));
 					},
 					FireflyOperand::Constant(primitive) => match primitive {
@@ -642,9 +945,13 @@ pub fn emit_statement(
 
 				let snapshot_var = var + 8;
 
-				if captures.len() > 0 {
-					// The size to allocate is the size of the reference counter (8, a u64) + the size of a tuple consisting of the captures. Alignment is not an issue, as the maximum alignment should be 8.
-					let size = 8 + size_of_ty(&FireflyType::Product(
+				if captures.len() == 0 {
+					// We give a NULL pointer, or zero; this is checked against in drop_rc.
+					instructions.push(MovIntoAddressFromU64((RBP, snapshot_var), 0));
+				} else {
+					// The size to allocate is the size of the reference counter (8, a u64) + (8, the destructor procedure) + the size of a tuple consisting of the captures. Alignment is not an issue, as the maximum alignment should be 8.
+					let size = 8
+						+ 8 + size_of_ty(&FireflyType::Product(
 						captures
 							.iter()
 							.map(|(ty, _)| ty.clone())
@@ -655,7 +962,22 @@ pub fn emit_statement(
 					instructions.push(CallLabel("malloc".to_owned()));
 					instructions.push(MovIntoAddressFromU64((RAX, 0), 1));
 
-					let mut capture_offset = 8;
+					let destructor_offset = 8;
+
+					let requisites = captures
+						.into_iter()
+						.map(|(ty, _)| ty.clone())
+						.collect::<Vec<_>>()
+						.into_boxed_slice();
+
+					let destructor = destructors.get(&requisites).unwrap().clone();
+
+					instructions.extend([
+						MovFromLabel(R10, destructor),
+						MovIntoAddressFromReg((RAX, destructor_offset), R10),
+					]);
+
+					let mut capture_offset = 8 + 8;
 					for (capture_ty, capture) in captures.into_iter() {
 						let capture_size = size_of_ty(capture_ty);
 						match capture {
@@ -663,10 +985,10 @@ pub fn emit_statement(
 								if capture_size == 0 {
 									()
 								} else if capture_size == 8 {
-									stack_frame.load::<true>(R10, projection, instructions);
+									stack_frame.emit_load::<true>(R10, projection, instructions);
 									instructions.push(MovIntoAddressFromReg((RAX, capture_offset), R10));
 								} else {
-									stack_frame.load::<false>(RSI, projection, instructions);
+									stack_frame.emit_load::<false>(RSI, projection, instructions);
 									instructions.extend([
 										MovFromReg(RDI, RAX),
 										AddFromI32(RDI, capture_offset),
@@ -705,9 +1027,13 @@ pub fn emit_statement(
 			domain,
 			body,
 		} => {
-			stack_frame.allocate_phi(label.clone(), parameter.clone(), domain.clone());
+			let visibles = stack_frame.allocate_phi(label.clone(), parameter.clone(), domain.clone());
 
-			let instructions = emit_term(block_stack, stack_frame, mailbox_offset, body).unwrap();
+			let instructions =
+				emit_term(destructors, block_stack, stack_frame, mailbox_offset, body, symbol_generator).unwrap();
+
+			// We restore the visibles and continue on.
+			stack_frame.current_visibles = visibles;
 
 			block_stack.push(NASMBlock {
 				local_label: emit_block_local_label(label.clone()),
@@ -718,10 +1044,12 @@ pub fn emit_statement(
 }
 
 pub fn emit_terminator(
+	destructors: &HashMap<Slice<FireflyType>, String>,
 	mailbox_offset: Option<i32>,
 	terminator: &FireflyTerminator,
 	instructions: &mut Vec<NASMInstruction>,
 	stack_frame: &mut StackFrame,
+	symbol_generator: &mut LabelGenerator,
 ) {
 	use NASMInstruction::*;
 	use NASMRegister64::*;
@@ -733,7 +1061,7 @@ pub fn emit_terminator(
 		} => {
 			match scrutinee {
 				FireflyOperand::Copy(projection) => {
-					stack_frame.load::<true>(RAX, projection, instructions);
+					stack_frame.emit_load::<true>(RAX, projection, instructions);
 				},
 				FireflyOperand::Constant(FireflyPrimitive::Polarity(b)) => {
 					instructions.push(MovFromI64(RAX, *b as i64));
@@ -756,6 +1084,9 @@ pub fn emit_terminator(
 			continuation_label,
 			argument,
 		} => {
+			stack_frame.emit_clones(symbol_generator, argument, instructions);
+			stack_frame.emit_clones(symbol_generator, snapshot, instructions);
+
 			let codomain_size = size_of_ty(codomain);
 			let continuation_and_parameter = if let Some(continuation_label) = continuation_label {
 				Some((
@@ -767,7 +1098,7 @@ pub fn emit_terminator(
 			};
 			let procedure_label = match procedure {
 				FireflyOperand::Copy(projection) => {
-					stack_frame.load::<true>(RAX, projection, instructions);
+					stack_frame.emit_load::<true>(RAX, projection, instructions);
 					None
 				},
 				FireflyOperand::Constant(primitive) => match primitive {
@@ -781,9 +1112,9 @@ pub fn emit_terminator(
 					if size == 0 {
 						()
 					} else if size == 8 {
-						stack_frame.load::<true>(RCX, projection, instructions);
+						stack_frame.emit_load::<true>(RCX, projection, instructions);
 					} else {
-						stack_frame.load::<false>(RCX, projection, instructions);
+						stack_frame.emit_load::<false>(RCX, projection, instructions);
 					}
 				},
 				FireflyOperand::Constant(primitive) => match primitive {
@@ -797,7 +1128,7 @@ pub fn emit_terminator(
 			}
 			match snapshot {
 				FireflyOperand::Copy(projection) => {
-					stack_frame.load::<true>(RDX, projection, instructions);
+					stack_frame.emit_load::<true>(RDX, projection, instructions);
 				},
 				FireflyOperand::Constant(primitive) => match primitive {
 					_ => panic!("bad snapshot primitive"),
@@ -830,8 +1161,24 @@ pub fn emit_terminator(
 					()
 				}
 
+				stack_frame.emit_drops(continuation_label.clone(), instructions, symbol_generator);
+
 				instructions.push(Jmp(emit_block_local_label(continuation.clone())));
 			} else {
+				// TODO: If no drops (which call free) are emitted, we don't have to preserve RAX in RSI.
+				// (But this can only happen in a procedure with no snapshots, as snapshots are always dropped)
+				if codomain_size == 8 {
+					instructions.push(MovFromReg(RSI, RAX));
+				}
+
+				stack_frame.emit_drops(continuation_label.clone(), instructions, symbol_generator);
+
+				// TODO: If no drops are emitted, we don't have to preserve RAX in RSI.
+				// (But this can only happen in a procedure with no snapshots, as snapshots are always dropped)
+				if codomain_size == 8 {
+					instructions.push(MovFromReg(RAX, RSI));
+				}
+
 				instructions.extend([Leave, Ret])
 			}
 		},
@@ -839,72 +1186,88 @@ pub fn emit_terminator(
 			continuation_label,
 			domain,
 			argument,
-		} => match argument {
-			FireflyOperand::Copy(projection) => {
-				let size = size_of_ty(&domain);
+		} => {
+			stack_frame.emit_clones(symbol_generator, argument, instructions);
+			match argument {
+				FireflyOperand::Copy(projection) => {
+					let size = size_of_ty(&domain);
 
-				if let Some(continuation_label) = continuation_label {
-					let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
+					if let Some(continuation_label) = continuation_label {
+						let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
 
-					if size == 0 {
-						()
-					} else if size == 8 {
-						stack_frame.load::<true>(RAX, projection, instructions);
+						if size == 0 {
+							()
+						} else if size == 8 {
+							stack_frame.emit_load::<true>(RAX, projection, instructions);
+							instructions.push(MovIntoAddressFromReg((RBP, parameter), RAX));
+						} else {
+							stack_frame.emit_load::<false>(RSI, projection, instructions);
+							instructions.extend([
+								MovFromReg(RDI, RBP),
+								AddFromI32(RDI, parameter),
+								MovFromU64(RCX, u64::from(size)),
+								RepMovsb,
+							]);
+						}
+
+						stack_frame.emit_drops(Some(continuation_label.clone()), instructions, symbol_generator);
+
+						instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
+					} else {
+						if size == 0 {
+							()
+						} else if size == 8 {
+							// TODO: If no drops are emitted, we don't have to preserve RAX in RSI.
+							// (But this can only happen in a procedure with no snapshots, as snapshots are always dropped)
+							stack_frame.emit_load::<true>(RSI, projection, instructions);
+						} else if let Some(mailbox_offset) = mailbox_offset {
+							stack_frame.emit_load::<false>(RSI, projection, instructions);
+							instructions.extend([
+								MovFromAddress(RDI, (RBP, mailbox_offset)),
+								MovFromU64(RCX, u64::from(size)),
+								RepMovsb,
+							]);
+						} else {
+							panic!("oversized value (or between-sized) but no mailbox to return to")
+						}
+
+						stack_frame.emit_drops(None, instructions, symbol_generator);
+
+						// TODO: If no drops are emitted, we don't have to preserve RAX in RSI.
+						// (But this can only happen in a procedure with no snapshots, as snapshots are always dropped)
+						if size == 8 {
+							instructions.push(MovFromReg(RAX, RSI));
+						}
+
+						instructions.push(Leave);
+						instructions.push(Ret);
+					}
+				},
+				FireflyOperand::Constant(primitive) => {
+					match primitive {
+						FireflyPrimitive::Unity => (),
+						FireflyPrimitive::Polarity(p) => {
+							instructions.push(MovFromI64(RAX, *p as i64));
+						},
+						FireflyPrimitive::Integer(n) => {
+							instructions.push(MovFromI64(RAX, *n));
+						},
+						FireflyPrimitive::Procedure(label) => {
+							instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())))
+						},
+					}
+
+					if let Some(continuation_label) = continuation_label {
+						let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
+
 						instructions.push(MovIntoAddressFromReg((RBP, parameter), RAX));
+						instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
 					} else {
-						stack_frame.load::<false>(RSI, projection, instructions);
-						instructions.extend([
-							MovFromReg(RDI, RBP),
-							AddFromI32(RDI, parameter),
-							MovFromU64(RCX, u64::from(size)),
-							RepMovsb,
-						]);
+						instructions.push(Leave);
+						instructions.push(Ret);
 					}
-					instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
-				} else {
-					if size == 0 {
-						()
-					} else if size == 8 {
-						stack_frame.load::<true>(RAX, projection, instructions);
-					} else if let Some(mailbox_offset) = mailbox_offset {
-						stack_frame.load::<false>(RSI, projection, instructions);
-						instructions.extend([
-							MovFromAddress(RDI, (RBP, mailbox_offset)),
-							MovFromU64(RCX, u64::from(size)),
-							RepMovsb,
-						]);
-					} else {
-						panic!("oversized value (or between-sized) but no mailbox to return to")
-					}
-
-					instructions.push(Leave);
-					instructions.push(Ret);
-				}
-			},
-			FireflyOperand::Constant(primitive) => {
-				match primitive {
-					FireflyPrimitive::Unity => (),
-					FireflyPrimitive::Polarity(p) => {
-						instructions.push(MovFromI64(RAX, *p as i64));
-					},
-					FireflyPrimitive::Integer(n) => {
-						instructions.push(MovFromI64(RAX, *n));
-					},
-					FireflyPrimitive::Procedure(label) => {
-						instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())))
-					},
-				}
-
-				if let Some(continuation_label) = continuation_label {
-					let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
-
-					instructions.push(MovIntoAddressFromReg((RBP, parameter), RAX));
-					instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
-				} else {
-					instructions.push(Leave);
-					instructions.push(Ret);
-				}
-			},
+				},
+			}
 		},
 	}
 }
@@ -918,7 +1281,6 @@ pub fn size_of_ty(ty: &FireflyType) -> u32 {
 		FireflyType::Product(factors) => factors.iter().map(size_of_ty).fold(0, core::ops::Add::add),
 		FireflyType::Procedure => 8,
 		FireflyType::Snapshot(_) => 8,
-		FireflyType::Closure => size_of_ty(&FireflyType::Procedure) + 8,
 	}
 }
 

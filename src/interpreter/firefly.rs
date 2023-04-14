@@ -11,8 +11,6 @@ pub enum FireflyProjector {
 	Parameter,
 	Field(usize),
 	Free(usize),
-	Procedure,
-	Snapshot,
 	Dereference,
 }
 
@@ -42,15 +40,18 @@ pub enum FireflyOperand {
 	Constant(FireflyPrimitive),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FireflyType {
 	Unity,
 	Polarity,
 	Integer,
 	Product(Slice<Self>),
 	Procedure,
-	Snapshot(Slice<Self>),
-	Closure,
+	Snapshot(Option<Slice<Self>>),
+}
+
+pub fn ff_closure_type() -> FireflyType {
+	FireflyType::Product(slice![FireflyType::Procedure, FireflyType::Snapshot(None),])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +62,6 @@ pub enum FireflyValue {
 	Procedure(Label),
 	Tuple(Slice<Self>),
 	Snapshot(Slice<Self>),
-	Closure(Box<Self>, Slice<Self>),
 	Address(FireflyProjection),
 }
 
@@ -139,7 +139,10 @@ impl FireflyOperation {
 					.collect::<Option<Vec<_>>>()?
 					.into_boxed_slice();
 
-				Some(FireflyValue::Closure(Box::new(procedure), snapshot_operands))
+				Some(FireflyValue::Tuple(slice![
+					procedure,
+					FireflyValue::Snapshot(snapshot_operands)
+				]))
 			},
 		}
 	}
@@ -366,7 +369,7 @@ impl FireflyProgram {
 					capture: None,
 					parameter: Some(left),
 					domain: FireflyType::Integer,
-					codomain: FireflyType::Closure,
+					codomain: ff_closure_type(),
 					body: FireflyTerm {
 						statements: vec![FireflyStatement::Assign {
 							binding: add_inner_closure,
@@ -383,7 +386,7 @@ impl FireflyProgram {
 						}],
 						terminator: FireflyTerminator::Jump {
 							continuation_label: None,
-							domain: FireflyType::Closure,
+							domain: ff_closure_type(),
 							argument: FireflyOperand::Copy(FireflyProjection::new(CypressVariable::Local(add_inner_closure))),
 						},
 					},
@@ -392,7 +395,7 @@ impl FireflyProgram {
 
 			intrinsics.insert(
 				"add".to_owned(),
-				FireflyValue::Closure(Box::new(FireflyValue::Procedure(add)), slice![]),
+				FireflyValue::Tuple(slice![FireflyValue::Procedure(add), FireflyValue::Snapshot(slice![])]),
 			);
 		}
 
@@ -434,7 +437,7 @@ impl FireflyProgram {
 			);
 			intrinsics.insert(
 				"add2".to_owned(),
-				FireflyValue::Closure(Box::new(FireflyValue::Procedure(add2)), slice![]),
+				FireflyValue::Tuple(slice![FireflyValue::Procedure(add2), FireflyValue::Snapshot(slice![])]),
 			);
 		}
 
@@ -467,24 +470,6 @@ fn lookup(
 			FireflyProjector::Free(index) => {
 				value = if let FireflyValue::Snapshot(parts) = value {
 					parts.get(*index)?.clone()
-				} else {
-					return None;
-				}
-			},
-			FireflyProjector::Procedure => {
-				value = if let FireflyValue::Closure(procedure_label, _) = value {
-					if let FireflyValue::Procedure(procedure_label) = *procedure_label {
-						FireflyValue::Procedure(procedure_label)
-					} else {
-						return None;
-					}
-				} else {
-					return None;
-				}
-			},
-			FireflyProjector::Snapshot => {
-				value = if let FireflyValue::Closure(_, snapshot) = value {
-					FireflyValue::Snapshot(snapshot)
 				} else {
 					return None;
 				}

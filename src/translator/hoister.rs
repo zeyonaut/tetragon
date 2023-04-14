@@ -11,7 +11,7 @@ use crate::{
 			FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyType,
 		},
 	},
-	utility::ignore::Ignore,
+	utility::{ignore::Ignore, slice::slice},
 };
 
 struct Substitution(HashMap<Label, FireflyProjection>);
@@ -279,7 +279,9 @@ pub fn hoist_ty(ty: CypressType) -> FireflyType {
 		CypressType::Unity => FireflyType::Unity,
 		CypressType::Polarity => FireflyType::Polarity,
 		CypressType::Integer => FireflyType::Integer,
-		CypressType::Power { domain: _, codomain: _ } => FireflyType::Closure,
+		CypressType::Power { domain: _, codomain: _ } => {
+			FireflyType::Product(slice![FireflyType::Procedure, FireflyType::Snapshot(None),])
+		},
 		CypressType::Product(factors) => FireflyType::Product(
 			factors
 				.into_vec()
@@ -463,10 +465,10 @@ pub fn hoist_term(
 		} => {
 			let function_projection = hoist_projection(function);
 			FireflyTerm::new(FireflyTerminator::Apply {
-				procedure: FireflyOperand::Copy(function_projection.clone().project(FireflyProjector::Procedure)),
+				procedure: FireflyOperand::Copy(function_projection.clone().project(FireflyProjector::Field(0))),
 				domain: hoist_ty(domain),
 				codomain: hoist_ty(codomain),
-				snapshot: FireflyOperand::Copy(function_projection.project(FireflyProjector::Snapshot)),
+				snapshot: FireflyOperand::Copy(function_projection.project(FireflyProjector::Field(1))),
 				continuation_label: continuation,
 				argument: FireflyOperand::Copy(hoist_projection(argument)),
 			})
