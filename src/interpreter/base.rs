@@ -1,11 +1,16 @@
 use std::sync::Arc;
 
-use crate::translator::label::Label;
+use crate::{translator::label::Label, utility::slice::match_slice};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BaseVariable {
 	Auto(Label),
 	Name(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BaseIntrinsic {
+	Add,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +35,10 @@ pub enum BaseTerm {
 		codomain: BaseType,
 		function: Box<Self>,
 		argument: Box<Self>,
+	},
+	IntrinsicInvocation {
+		intrinsic: BaseIntrinsic,
+		arguments: Vec<Self>,
 	},
 	Assignment {
 		ty: BaseType,
@@ -72,6 +81,10 @@ impl BaseTerm {
 				function: _,
 				argument: _,
 			} => ty.clone(),
+			Self::IntrinsicInvocation {
+				intrinsic: BaseIntrinsic::Add,
+				arguments: _,
+			} => BaseType::Integer,
 			Self::Assignment {
 				ty,
 				assignee: _,
@@ -217,6 +230,22 @@ pub fn interpret_base(base_term: BaseTerm, environment: BaseEnvironment) -> Opti
 				BaseValue::RecursiveFunction(function) => (function.function.clone())(function, argument),
 				_ => None,
 			}
+		},
+		IntrinsicInvocation { intrinsic, arguments } => match intrinsic {
+			BaseIntrinsic::Add => {
+				match_slice! { arguments.into_boxed_slice();
+					[left, right] => {
+						let left = interpret_base(left, environment.clone())?;
+						let right = interpret_base(right, environment)?;
+						if let [BaseValue::Integer(x), BaseValue::Integer(y)] = [left, right] {
+							Some(BaseValue::Integer(x + y))
+						} else {
+							None
+						}
+					},
+					_ => None,
+				}
+			},
 		},
 		Assignment {
 			ty: _,

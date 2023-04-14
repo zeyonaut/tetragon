@@ -18,8 +18,10 @@ enum Nonterminal {
 	Value,
 	DelimitedValue,
 	SmallValue,
+	LongValue,
 	AppliedValue,
 	ValueList,
+	IntrinsicInvocation,
 	Type,
 	DelimitedType,
 	TypeList,
@@ -60,6 +62,10 @@ pub enum ParsedTerm {
 	Application {
 		function: Box<Self>,
 		argument: Box<Self>,
+	},
+	IntrinsicInvocation {
+		intrinsic: String,
+		arguments: Vec<Self>,
 	},
 	Assignment {
 		binding: String,
@@ -121,6 +127,14 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 						scrutinee: Box::new(scrutinee),
 						cases,
 					})
+				},
+				_ => Node::Fail,
+			}
+		},
+		Nonterminal::LongValue => {
+			match_slice! { pattern;
+				[Nx(Node::Term(term))] => {
+					Node::Term(term)
 				},
 				_ => Node::Fail,
 			}
@@ -189,6 +203,17 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 					let mut list = list;
 					list.push(term);
 					Node::ValueList(list)
+				},
+				_ => Node::Fail,
+			}
+		},
+		Nonterminal::IntrinsicInvocation => {
+			match_slice! { pattern;
+				[Tx(Intrinsic(intrinsic))] => Node::Term(ParsedTerm::IntrinsicInvocation {intrinsic, arguments: Vec::new()}),
+				[Nx(Node::Term(ParsedTerm::IntrinsicInvocation {intrinsic, arguments})), Nx(Node::Term(term))] => {
+					let mut arguments = arguments;
+					arguments.push(term);
+					Node::Term(ParsedTerm::IntrinsicInvocation {intrinsic, arguments})
 				},
 				_ => Node::Fail,
 			}
@@ -263,10 +288,14 @@ impl Parser {
 		let grammar = grammar![
 			Value;
 			Value => [
-				[@AppliedValue],
+				[@LongValue],
 				[!Name, !Bicolon, @DelimitedValue, @Value],      // Assignment
-				[@AppliedValue, !EqualsQuestion, @AppliedValue], // Equality query
-				[@DelimitedValue, !Question, @Cases]             // Case split
+				[@LongValue, !EqualsQuestion, @LongValue], // Equality query
+				[@DelimitedValue, !Question, @Cases],             // Case split
+			]
+			LongValue => [
+				[@AppliedValue],
+				[@IntrinsicInvocation],
 			]
 			AppliedValue => [
 				[@DelimitedValue],
@@ -289,6 +318,10 @@ impl Parser {
 				[],
 				[@Value],
 				[@ValueList, !Comma, @Value],
+			]
+			IntrinsicInvocation => [
+				[!Intrinsic],
+				[@IntrinsicInvocation, @DelimitedValue],
 			]
 			Cases => [
 				[],                                               // Empty cases

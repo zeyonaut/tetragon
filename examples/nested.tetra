@@ -1,10 +1,10 @@
 a :: {x Int} -> Int [
-	q :: [add x 1]
+	q :: [#add x 1]
 	b :: {y Int} -> Int [
-		r :: [add y 3]
+		r :: [#add y 3]
 		c :: {z Int} -> Int [
-			s :: [add z 5]
-			add [add q [add q [add q r]]] [add s s]
+			s :: [#add z 5]
+			#add [#add q [#add q [#add q r]]] [#add s s]
 		]
 		c 4
 	]

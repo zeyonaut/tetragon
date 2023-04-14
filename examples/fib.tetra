@@ -4,7 +4,7 @@ fib :: {self @} {m Int} -> Int [
 	no  | [
 		[m =? 1] ?
 		yes | 1
-		no  | [add [self [add m -1]] [self [add m -2]]]
+		no  | [#add [self [#add m -1]] [self [#add m -2]]]
 	]
 ]
 fib 30

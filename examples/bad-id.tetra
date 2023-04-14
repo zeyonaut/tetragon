@@ -1,6 +1,6 @@
 bad-id :: {self @} {m Int} -> Int [
 	[m =? 0] ?
 	yes | 0
-	no  | [add 1 [self [add m -1]]]
+	no  | [#add 1 [self [#add m -1]]]
 ]
 bad-id 10000

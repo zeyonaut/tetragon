@@ -1,7 +1,7 @@
 use super::label::*;
 use crate::{
 	interpreter::{base::*, cypress::*},
-	utility::composite::apply_composed,
+	utility::{composite::apply_composed, slice::match_slice},
 };
 
 pub fn convert_variable_to_cps(variable: BaseVariable) -> CypressProjection {
@@ -158,6 +158,28 @@ pub fn convert_expression_to_cps(
 					}))
 				}),
 			))
+		},
+		BaseTerm::IntrinsicInvocation { intrinsic, arguments } => match intrinsic {
+			BaseIntrinsic::Add => {
+				match_slice! { arguments.into_boxed_slice();
+					[left, right] => {
+						let [binding] = symbol_generator.fresh();
+						let (left_variable, left_context) = convert_expression_to_cps(left, symbol_generator)?;
+						let (right_variable, right_context) = convert_expression_to_cps(right, symbol_generator)?;
+						Some((
+							CypressProjection::new(CypressVariable::Local(binding)),
+							Box::new(move |body| {
+								left_context(right_context(CypressTerm::AssignOperation {
+									binding,
+									operation: CypressOperation::Add([left_variable, right_variable]),
+									rest: Box::new(body),
+								}))
+							}),
+						))
+					},
+					_ => None,
+				}
+			},
 		},
 		BaseTerm::Assignment {
 			ty: _,
@@ -386,6 +408,27 @@ pub fn convert_tail_expression_to_cps(
 				continuation: continuation_label,
 				argument: argument_variable,
 			})))
+		},
+		BaseTerm::IntrinsicInvocation { intrinsic, arguments } => match intrinsic {
+			BaseIntrinsic::Add => {
+				match_slice! { arguments.into_boxed_slice();
+					[left, right] => {
+						let [binding] = symbol_generator.fresh();
+						let (left_variable, left_context) = convert_expression_to_cps(left, symbol_generator)?;
+						let (right_variable, right_context) = convert_expression_to_cps(right, symbol_generator)?;
+						Some(left_context(right_context(CypressTerm::AssignOperation {
+							binding,
+							operation: CypressOperation::Add([left_variable, right_variable]),
+							rest: Box::new(CypressTerm::Continue {
+								continuation_label,
+								argument: CypressProjection::new(CypressVariable::Local(binding)),
+								domain: CypressType::Integer,
+							}),
+						})))
+					},
+					_ => None,
+				}
+			},
 		},
 		BaseTerm::Assignment {
 			ty: _,

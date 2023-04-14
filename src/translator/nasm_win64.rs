@@ -259,7 +259,9 @@ impl StackFrame {
 					}
 				}
 			},
-			_ => unimplemented!(), // TODO: Not on stack?
+			CypressVariable::Global(ref test) => {
+				println!("{test}")
+			},
 		}
 	}
 

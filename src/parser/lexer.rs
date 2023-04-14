@@ -20,6 +20,7 @@ create_token_and_terminal_types! {
 		EqualsQuestion,
 		IntegerLiteral(i64),
 		Name(String),
+		Intrinsic(String),
 		OpenCurly,
 		OpenOrtho,
 		OpenParen,
@@ -102,6 +103,15 @@ fn lex_name(head: char, tail: &mut Scanner) -> Token {
 	Name(name)
 }
 
+fn lex_intrinsic(scanner: &mut Scanner) -> Token {
+	use Token::Intrinsic;
+	let mut intrinsic = String::new();
+	while let Some(y) = scanner.next_if(|&y| y.is_ascii_alphanumeric() || y == '-') {
+		intrinsic.push(y);
+	}
+	Intrinsic(intrinsic)
+}
+
 /// Takes a first character and a peekable stream of characters and may produce a token representing an integer.
 fn lex_integer(head: char, tail: &mut Scanner) -> Result<Token, LexError> {
 	use Token::IntegerLiteral;
@@ -173,6 +183,7 @@ impl<'source> Iterator for Lexer<'source> {
 			'?' => Ok(Question),
 			x if x.is_ascii_alphabetic() => Ok(lex_name(x, &mut self.scanner)),
 			x if x.is_ascii_digit() || x == '+' => lex_integer(x, &mut self.scanner),
+			'#' => Ok(lex_intrinsic(&mut self.scanner)),
 			x => Err(UnknownLexeme {
 				lexeme: String::from(x),
 				line: self.line(),

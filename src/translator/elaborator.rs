@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::label::{Label, LabelGenerator};
 use crate::{
-	interpreter::base::{BaseTerm, BaseType, BaseVariable},
+	interpreter::base::{BaseIntrinsic, BaseTerm, BaseType, BaseVariable},
 	parser::parser::*,
 	utility::slice::match_slice,
 };
@@ -214,6 +214,19 @@ pub fn elaborate_term(
 			} else {
 				None
 			}
+		},
+		(None, ParsedTerm::IntrinsicInvocation { intrinsic, arguments }) => match intrinsic.as_str() {
+			"add" => {
+				match_slice! { arguments.into_boxed_slice();
+					[term_0, term_1] => {
+						let term_0 = elaborate_term(context.clone(), term_0, Some(BaseType::Integer), names, numbers, symbol_generator)?;
+						let term_1 = elaborate_term(context, term_1, Some(BaseType::Integer), names, numbers, symbol_generator)?;
+						Some(BaseTerm::IntrinsicInvocation { intrinsic: BaseIntrinsic::Add, arguments: vec![term_0, term_1] })
+					},
+					_ => None,
+				}
+			},
+			_ => None,
 		},
 		(
 			None,
