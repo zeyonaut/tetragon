@@ -157,6 +157,7 @@ pub struct StackFrame {
 	label_to_offset_from_frame_pointer: HashMap<Label, (FireflyType, i32)>,
 	continuation_to_parameter: HashMap<Label, Label>,
 	current_frame_pointer_offset: i32,
+	min_offset: i32,
 	// Used for checking what needs to be dropped at any given terminator (for reference counting).
 	current_visibles: HashSet<Label>,
 	continuation_to_visibles: HashMap<Label, HashSet<Label>>,
@@ -168,15 +169,14 @@ impl StackFrame {
 			label_to_offset_from_frame_pointer: HashMap::new(),
 			continuation_to_parameter: HashMap::new(),
 			current_frame_pointer_offset: 0,
+			min_offset: 0,
 			current_visibles: HashSet::new(),
 			continuation_to_visibles: HashMap::new(),
 		}
 	}
 
 	pub fn size(&self) -> u32 {
-		self.label_to_offset_from_frame_pointer
-			.values()
-			.fold(0, |acc, (ty, _)| acc + size_of_ty(ty))
+		u32::try_from(-self.min_offset).unwrap()
 	}
 
 	pub fn allocate(&mut self, label: Label, ty: FireflyType, is_owning: bool) -> i32 {
@@ -185,18 +185,22 @@ impl StackFrame {
 		}
 
 		self.current_frame_pointer_offset -= size_of_ty(&ty) as i32;
+		if self.current_frame_pointer_offset < self.min_offset {
+			self.min_offset = self.current_frame_pointer_offset;
+		}
 		self.label_to_offset_from_frame_pointer
 			.insert(label, (ty, self.current_frame_pointer_offset));
 		self.current_frame_pointer_offset
 	}
 
 	// Returns the labels visible before the phi node was allocated.
-	pub fn allocate_phi(&mut self, continuation: Label, parameter: Label, ty: FireflyType) -> HashSet<Label> {
+	pub fn allocate_phi(&mut self, continuation: Label, parameter: Label, ty: FireflyType) -> (i32, HashSet<Label>) {
+		let current_frame_pointer_offset = self.current_frame_pointer_offset;
 		let current_visibles = self.current_visibles.clone();
 		self.continuation_to_visibles.insert(continuation, current_visibles.clone());
 		self.continuation_to_parameter.insert(continuation, parameter.clone());
 		self.allocate(parameter.clone(), ty, true);
-		current_visibles
+		(current_frame_pointer_offset, current_visibles)
 	}
 
 	pub fn get(&self, label: &Label) -> Option<(FireflyType, i32)> {
@@ -1031,13 +1035,15 @@ pub fn emit_statement(
 			domain,
 			body,
 		} => {
-			let visibles = stack_frame.allocate_phi(label.clone(), parameter.clone(), domain.clone());
+			let (fp_offset, visibles) = stack_frame.allocate_phi(label.clone(), parameter.clone(), domain.clone());
 
 			let instructions =
 				emit_term(destructors, block_stack, stack_frame, mailbox_offset, body, symbol_generator).unwrap();
 
 			// We restore the visibles and continue on.
 			stack_frame.current_visibles = visibles;
+
+			stack_frame.current_frame_pointer_offset = fp_offset;
 
 			block_stack.push(NASMBlock {
 				local_label: emit_block_local_label(label.clone()),
