@@ -32,6 +32,15 @@ impl FireflyProjection {
 		self.projectors.push(projector);
 		self
 	}
+
+	pub fn is_indirect(&self) -> bool {
+		for projector in &self.projectors {
+			if matches!(projector, FireflyProjector::Field(_) | FireflyProjector::Dereference) {
+				return true;
+			}
+		}
+		false
+	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,7 +1,7 @@
 fun ::
-	{extra Int} -> [Pol -> * (Int, Int) -> * (Int, Int, Int)] [
-	inner :: {should-flip Pol} -> [* (Int, Int) -> * (Int, Int, Int)] [
-		{x * (Int, Int)} -> * (Int, Int, Int) [
+	{extra Int} [
+	inner :: {should-flip Pol} [
+		{x * (Int, Int)} [
 			should-flip ?
 			no  | (x.0, x.1, extra)
 			yes | (x.1, extra, x.0)

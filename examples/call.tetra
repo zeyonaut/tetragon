@@ -1,4 +1,4 @@
-fun :: {self @} {x Pol} -> * (Int, Int) [
+fun :: {x Pol} [
 	x ?
 	yes | (900, 800)
 	no  | (700, 600)

@@ -179,8 +179,10 @@ impl StackFrame {
 			.fold(0, |acc, (ty, _)| acc + size_of_ty(ty))
 	}
 
-	pub fn allocate(&mut self, label: Label, ty: FireflyType) -> i32 {
-		self.current_visibles.insert(label.clone());
+	pub fn allocate(&mut self, label: Label, ty: FireflyType, is_owning: bool) -> i32 {
+		if is_owning {
+			self.current_visibles.insert(label.clone());
+		}
 
 		self.current_frame_pointer_offset -= size_of_ty(&ty) as i32;
 		self.label_to_offset_from_frame_pointer
@@ -193,7 +195,7 @@ impl StackFrame {
 		let current_visibles = self.current_visibles.clone();
 		self.continuation_to_visibles.insert(continuation, current_visibles.clone());
 		self.continuation_to_parameter.insert(continuation, parameter.clone());
-		self.allocate(parameter.clone(), ty);
+		self.allocate(parameter.clone(), ty, true);
 		current_visibles
 	}
 
@@ -621,7 +623,7 @@ pub fn emit_procedure(
 	let mut stack_frame = StackFrame::default(); // Takes a label and gives an offset from the stack.
 
 	let parameter_offset = if let Some(parameter) = procedure.parameter {
-		Some(stack_frame.allocate(parameter, procedure.domain.clone()))
+		Some(stack_frame.allocate(parameter, procedure.domain.clone(), true))
 	} else {
 		None
 	};
@@ -638,6 +640,7 @@ pub fn emit_procedure(
 			Some(stack_frame.allocate(
 				capture_parameter.clone(),
 				FireflyType::Snapshot(Some(capture_requisites.clone())),
+				true,
 			))
 		}
 	} else {
@@ -647,7 +650,7 @@ pub fn emit_procedure(
 	let codomain_size = size_of_ty(&procedure.codomain);
 	let [mailbox] = symbol_generator.fresh();
 	let mailbox_offset = if codomain_size > 8 {
-		Some(stack_frame.allocate(mailbox.clone(), FireflyType::Integer)) // FIXME: This is not technically an integer, but a raw pointer.
+		Some(stack_frame.allocate(mailbox.clone(), FireflyType::Integer, true)) // FIXME: This is not technically an integer, but a raw pointer.
 	} else {
 		None
 	};
@@ -765,7 +768,7 @@ pub fn emit_statement(
 			FireflyOperation::Id(ty, operand) => {
 				stack_frame.emit_clones(symbol_generator, operand, instructions);
 
-				let var = stack_frame.allocate(binding.clone(), ty.clone());
+				let var = stack_frame.allocate(binding.clone(), ty.clone(), true);
 				match operand {
 					FireflyOperand::Copy(projection) => {
 						let size = size_of_ty(&ty);
@@ -802,7 +805,7 @@ pub fn emit_statement(
 				}
 			},
 			FireflyOperation::Binary(BinaryOperator::Add, [left, right]) => {
-				let var = stack_frame.allocate(binding.clone(), FireflyType::Integer);
+				let var = stack_frame.allocate(binding.clone(), FireflyType::Integer, true);
 				instructions.push(MovFromU64(RAX, 0));
 
 				fn push_addition(instructions: &mut Vec<NASMInstruction>, operand: &FireflyOperand, stack_frame: &StackFrame) {
@@ -826,7 +829,7 @@ pub fn emit_statement(
 				instructions.push(MovIntoAddressFromReg((RBP, var), RAX));
 			},
 			FireflyOperation::Binary(BinaryOperator::EqualsQuery(ty), [left, right]) => {
-				let var = stack_frame.allocate(binding.clone(), FireflyType::Polarity);
+				let var = stack_frame.allocate(binding.clone(), FireflyType::Polarity, true);
 				let size = size_of_ty(ty);
 				if size == 0 {
 					instructions.extend([MovFromI64(RAX, 1), MovIntoAddressFromReg((RBP, var), RAX)])
@@ -879,6 +882,7 @@ pub fn emit_statement(
 				let var = stack_frame.allocate(
 					binding.clone(),
 					FireflyType::Product(fields.iter().map(|(ty, _)| ty.clone()).collect::<Vec<_>>().into_boxed_slice()),
+					true,
 				);
 
 				let mut pigeonhole = 0i32;
@@ -925,7 +929,7 @@ pub fn emit_statement(
 					stack_frame.emit_clones(symbol_generator, operand, instructions);
 				}
 
-				let var = stack_frame.allocate(binding.clone(), ff_closure_type());
+				let var = stack_frame.allocate(binding.clone(), ff_closure_type(), true);
 
 				let proc_var = var;
 
@@ -1084,9 +1088,6 @@ pub fn emit_terminator(
 			continuation_label,
 			argument,
 		} => {
-			stack_frame.emit_clones(symbol_generator, argument, instructions);
-			stack_frame.emit_clones(symbol_generator, snapshot, instructions);
-
 			let codomain_size = size_of_ty(codomain);
 			let continuation_and_parameter = if let Some(continuation_label) = continuation_label {
 				Some((
@@ -1096,25 +1097,66 @@ pub fn emit_terminator(
 			} else {
 				None
 			};
-			let procedure_label = match procedure {
-				FireflyOperand::Copy(projection) => {
-					stack_frame.emit_load::<true>(RAX, projection, instructions);
+
+			stack_frame.emit_clones(symbol_generator, argument, instructions);
+			stack_frame.emit_clones(symbol_generator, snapshot, instructions);
+
+			let phi_buffer = if let Some((continuation_label, (_, _))) = continuation_and_parameter {
+				if let FireflyOperand::Copy(projection) = argument {
+					if projection.root
+						== CypressVariable::Local(
+							stack_frame.continuation_to_parameter.get(continuation_label).unwrap().clone(),
+						) && projection.is_indirect()
+					{
+						let [phi_buffer_label] = symbol_generator.fresh();
+						let phi_buffer_offset = stack_frame.allocate(phi_buffer_label, domain.clone(), false);
+						Some((
+							FireflyProjection::new(CypressVariable::Local(phi_buffer_label)),
+							phi_buffer_offset,
+						))
+					} else {
+						None
+					}
+				} else {
 					None
-				},
-				FireflyOperand::Constant(primitive) => match primitive {
-					FireflyPrimitive::Procedure(label) => Some(label.clone()),
-					_ => panic!("bad procedure primitive"),
-				},
+				}
+			} else {
+				None
 			};
+
 			match argument {
 				FireflyOperand::Copy(projection) => {
 					let size = size_of_ty(domain);
 					if size == 0 {
 						()
-					} else if size == 8 {
-						stack_frame.emit_load::<true>(RCX, projection, instructions);
 					} else {
-						stack_frame.emit_load::<false>(RCX, projection, instructions);
+						if let Some((phi_buffer_projection, phi_buffer_offset)) = phi_buffer {
+							if size == 8 {
+								stack_frame.emit_load::<true>(RAX, projection, instructions);
+								instructions.push(MovIntoAddressFromReg((RBP, phi_buffer_offset), RAX));
+							} else {
+								stack_frame.emit_load::<false>(RSI, projection, instructions);
+								instructions.extend([
+									MovFromReg(RDI, RBP),
+									AddFromI32(RDI, phi_buffer_offset),
+									MovFromU64(RCX, u64::from(size)),
+									RepMovsb,
+								]);
+							}
+							stack_frame.emit_drops(continuation_label.clone(), instructions, symbol_generator);
+							if size == 8 {
+								stack_frame.emit_load::<true>(RCX, &phi_buffer_projection, instructions);
+							} else {
+								stack_frame.emit_load::<false>(RCX, &phi_buffer_projection, instructions);
+							}
+						} else {
+							stack_frame.emit_drops(continuation_label.clone(), instructions, symbol_generator);
+							if size == 8 {
+								stack_frame.emit_load::<true>(RCX, projection, instructions);
+							} else {
+								stack_frame.emit_load::<false>(RCX, projection, instructions);
+							}
+						}
 					}
 				},
 				FireflyOperand::Constant(primitive) => match primitive {
@@ -1145,6 +1187,17 @@ pub fn emit_terminator(
 				}
 			}
 
+			let procedure_label = match procedure {
+				FireflyOperand::Copy(projection) => {
+					stack_frame.emit_load::<true>(RAX, projection, instructions);
+					None
+				},
+				FireflyOperand::Constant(primitive) => match primitive {
+					FireflyPrimitive::Procedure(label) => Some(label.clone()),
+					_ => panic!("bad procedure primitive"),
+				},
+			};
+
 			if let Some(procedure_label) = procedure_label {
 				instructions.push(CallLabel(emit_procedure_label(procedure_label)));
 			} else {
@@ -1160,8 +1213,6 @@ pub fn emit_terminator(
 				} else {
 					()
 				}
-
-				stack_frame.emit_drops(continuation_label.clone(), instructions, symbol_generator);
 
 				instructions.push(Jmp(emit_block_local_label(continuation.clone())));
 			} else {
@@ -1187,21 +1238,77 @@ pub fn emit_terminator(
 			domain,
 			argument,
 		} => {
+			let continuation_and_parameter = if let Some(continuation_label) = continuation_label {
+				Some((
+					continuation_label,
+					stack_frame.get_phi(continuation_label).expect("no such continuation"),
+				))
+			} else {
+				None
+			};
+
 			stack_frame.emit_clones(symbol_generator, argument, instructions);
+
+			let phi_buffer = if let Some((continuation_label, (_, _))) = continuation_and_parameter {
+				if let FireflyOperand::Copy(projection) = argument {
+					if projection.root
+						== CypressVariable::Local(
+							stack_frame.continuation_to_parameter.get(continuation_label).unwrap().clone(),
+						) && projection.is_indirect()
+					{
+						let [phi_buffer_label] = symbol_generator.fresh();
+						let phi_buffer_offset = stack_frame.allocate(phi_buffer_label, domain.clone(), false);
+						Some((
+							FireflyProjection::new(CypressVariable::Local(phi_buffer_label)),
+							phi_buffer_offset,
+						))
+					} else {
+						None
+					}
+				} else {
+					None
+				}
+			} else {
+				None
+			};
+
 			match argument {
 				FireflyOperand::Copy(projection) => {
 					let size = size_of_ty(&domain);
 
-					if let Some(continuation_label) = continuation_label {
-						let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
+					if let Some((continuation_label, (_, parameter))) = continuation_and_parameter {
+						if let Some((_, phi_buffer_offset)) = phi_buffer {
+							if size == 0 {
+								()
+							} else if size == 8 {
+								stack_frame.emit_load::<true>(RAX, projection, instructions);
+								instructions.push(MovIntoAddressFromReg((RBP, phi_buffer_offset), RAX));
+							} else {
+								stack_frame.emit_load::<false>(RSI, projection, instructions);
+								instructions.extend([
+									MovFromReg(RDI, RBP),
+									AddFromI32(RDI, phi_buffer_offset),
+									MovFromU64(RCX, u64::from(size)),
+									RepMovsb,
+								]);
+							}
+						}
+
+						let projection = if let Some((phi_buffer_projection, _)) = phi_buffer {
+							phi_buffer_projection
+						} else {
+							projection.clone()
+						};
+
+						stack_frame.emit_drops(Some(continuation_label.clone()), instructions, symbol_generator);
 
 						if size == 0 {
 							()
 						} else if size == 8 {
-							stack_frame.emit_load::<true>(RAX, projection, instructions);
+							stack_frame.emit_load::<true>(RAX, &projection, instructions);
 							instructions.push(MovIntoAddressFromReg((RBP, parameter), RAX));
 						} else {
-							stack_frame.emit_load::<false>(RSI, projection, instructions);
+							stack_frame.emit_load::<false>(RSI, &projection, instructions);
 							instructions.extend([
 								MovFromReg(RDI, RBP),
 								AddFromI32(RDI, parameter),
@@ -1209,8 +1316,6 @@ pub fn emit_terminator(
 								RepMovsb,
 							]);
 						}
-
-						stack_frame.emit_drops(Some(continuation_label.clone()), instructions, symbol_generator);
 
 						instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
 					} else {
@@ -1230,9 +1335,7 @@ pub fn emit_terminator(
 						} else {
 							panic!("oversized value (or between-sized) but no mailbox to return to")
 						}
-
 						stack_frame.emit_drops(None, instructions, symbol_generator);
-
 						// TODO: If no drops are emitted, we don't have to preserve RAX in RSI.
 						// (But this can only happen in a procedure with no snapshots, as snapshots are always dropped)
 						if size == 8 {
@@ -1257,9 +1360,7 @@ pub fn emit_terminator(
 						},
 					}
 
-					if let Some(continuation_label) = continuation_label {
-						let (_, parameter) = stack_frame.get_phi(continuation_label).expect("no such continuation");
-
+					if let Some((continuation_label, (_, parameter))) = continuation_and_parameter {
 						instructions.push(MovIntoAddressFromReg((RBP, parameter), RAX));
 						instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));
 					} else {
