@@ -52,7 +52,7 @@ pub enum ParsedTerm {
 	Function {
 		parameter: String,
 		domain: ParsedType,
-		codomain: ParsedType,
+		codomain: Option<ParsedType>,
 		body: Box<Self>,
 	},
 	Fixpoint {
@@ -159,7 +159,10 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 					Node::Term(term)
 				},
 				[Tx(OpenCurly), Tx(Name(parameter)), Nx(Node::Type(domain)), Tx(CloseCurly), Tx(Arrow), Nx(Node::Type(codomain)), Nx(Node::Term(body))] => {
-					Node::Term(ParsedTerm::Function { parameter, domain, codomain, body: Box::new(body) })
+					Node::Term(ParsedTerm::Function { parameter, domain, codomain: Some(codomain), body: Box::new(body) })
+				},
+				[Tx(OpenCurly), Tx(Name(parameter)), Nx(Node::Type(domain)), Tx(CloseCurly), Nx(Node::Term(body))] => {
+					Node::Term(ParsedTerm::Function { parameter, domain, codomain: None, body: Box::new(body) })
 				},
 				[Tx(OpenCurly), Tx(Name(binding)), Tx(Arrova), Tx(CloseCurly), Nx(Node::Term(body))] => {
 					Node::Term(ParsedTerm::Fixpoint { binding, body: Box::new(body) })
@@ -304,6 +307,7 @@ impl Parser {
 			DelimitedValue => [
 				[@SmallValue],
 				[!OpenCurly, !Name, @Type, !CloseCurly, !Arrow, @DelimitedType, @DelimitedValue],   // Lambda binding
+				[!OpenCurly, !Name, @Type, !CloseCurly, @DelimitedValue],   // Lambda binding
 				[!OpenCurly, !Name, !Arrova, !CloseCurly, @DelimitedValue], // Mu binding
 			]
 			SmallValue => [

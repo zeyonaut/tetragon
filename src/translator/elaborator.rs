@@ -111,7 +111,11 @@ pub fn elaborate_term(
 			},
 		) => {
 			let domain = elaborate_ty(domain)?;
-			let codomain = elaborate_ty(codomain)?;
+			let codomain = if let Some(codomain) = codomain {
+				Some(elaborate_ty(codomain)?)
+			} else {
+				None
+			};
 
 			let shadowed_parameter_number = numbers.get(&parameter).copied();
 			let [bound_parameter_number] = symbol_generator.fresh();
@@ -121,11 +125,13 @@ pub fn elaborate_term(
 			let body = elaborate_term(
 				context.extend(BaseVariable::Auto(bound_parameter_number), domain.clone()),
 				*body,
-				Some(codomain.clone()),
+				codomain.clone(),
 				names,
 				numbers,
 				symbol_generator,
 			)?;
+
+			let codomain = body.ty();
 
 			if let Some(shadowed_parameter_number) = shadowed_parameter_number {
 				numbers.insert(parameter, shadowed_parameter_number);
@@ -154,7 +160,7 @@ pub fn elaborate_term(
 			} = *mu_body.clone()
 			{
 				let domain = elaborate_ty(domain)?;
-				let codomain = elaborate_ty(codomain)?;
+				let codomain = elaborate_ty(codomain?)?;
 
 				let shadowed_fixpoint_number = numbers.get(&parameter).copied();
 				let [bound_fixpoint_number] = symbol_generator.fresh();
