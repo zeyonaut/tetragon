@@ -1104,65 +1104,30 @@ pub fn emit_terminator(
 				None
 			};
 
-			stack_frame.emit_clones(symbol_generator, argument, instructions);
-			stack_frame.emit_clones(symbol_generator, snapshot, instructions);
-
-			let phi_buffer = if let Some((continuation_label, (_, _))) = continuation_and_parameter {
-				if let FireflyOperand::Copy(projection) = argument {
-					if projection.root
-						== CypressVariable::Local(
-							stack_frame.continuation_to_parameter.get(continuation_label).unwrap().clone(),
-						) && projection.is_indirect()
-					{
-						let [phi_buffer_label] = symbol_generator.fresh();
-						let phi_buffer_offset = stack_frame.allocate(phi_buffer_label, domain.clone(), false);
-						Some((
-							FireflyProjection::new(CypressVariable::Local(phi_buffer_label)),
-							phi_buffer_offset,
-						))
-					} else {
-						None
-					}
-				} else {
-					None
-				}
+			let phi_buffer = if let Some((_, (_, _))) = continuation_and_parameter {
+				let [phi_buffer_label] = symbol_generator.fresh();
+				let phi_buffer_offset = stack_frame.allocate(phi_buffer_label, codomain.clone(), false);
+				println!("Made a phi buffer");
+				Some((
+					FireflyProjection::new(CypressVariable::Local(phi_buffer_label)),
+					phi_buffer_offset,
+				))
 			} else {
 				None
 			};
+
+			stack_frame.emit_clones(symbol_generator, argument, instructions);
+			stack_frame.emit_clones(symbol_generator, snapshot, instructions);
 
 			match argument {
 				FireflyOperand::Copy(projection) => {
 					let size = size_of_ty(domain);
 					if size == 0 {
 						()
+					} else if size == 8 {
+						stack_frame.emit_load::<true>(RCX, projection, instructions);
 					} else {
-						if let Some((phi_buffer_projection, phi_buffer_offset)) = phi_buffer {
-							if size == 8 {
-								stack_frame.emit_load::<true>(RAX, projection, instructions);
-								instructions.push(MovIntoAddressFromReg((RBP, phi_buffer_offset), RAX));
-							} else {
-								stack_frame.emit_load::<false>(RSI, projection, instructions);
-								instructions.extend([
-									MovFromReg(RDI, RBP),
-									AddFromI32(RDI, phi_buffer_offset),
-									MovFromU64(RCX, u64::from(size)),
-									RepMovsb,
-								]);
-							}
-							stack_frame.emit_drops(continuation_label.clone(), instructions, symbol_generator);
-							if size == 8 {
-								stack_frame.emit_load::<true>(RCX, &phi_buffer_projection, instructions);
-							} else {
-								stack_frame.emit_load::<false>(RCX, &phi_buffer_projection, instructions);
-							}
-						} else {
-							stack_frame.emit_drops(continuation_label.clone(), instructions, symbol_generator);
-							if size == 8 {
-								stack_frame.emit_load::<true>(RCX, projection, instructions);
-							} else {
-								stack_frame.emit_load::<false>(RCX, projection, instructions);
-							}
-						}
+						stack_frame.emit_load::<false>(RCX, projection, instructions);
 					}
 				},
 				FireflyOperand::Constant(primitive) => match primitive {
@@ -1184,8 +1149,8 @@ pub fn emit_terminator(
 			}
 
 			if codomain_size > 8 {
-				if let Some((_, (_, continuation_parameter_offset))) = &continuation_and_parameter {
-					instructions.extend([MovFromReg(R8, RBP), AddFromI32(R8, *continuation_parameter_offset)])
+				if let Some((_, phi_buffer_offset)) = phi_buffer {
+					instructions.extend([MovFromReg(R8, RBP), AddFromI32(R8, phi_buffer_offset)])
 				} else if let Some(mailbox_offset) = mailbox_offset {
 					instructions.push(MovFromAddress(R8, (RBP, mailbox_offset)));
 				} else {
@@ -1218,6 +1183,35 @@ pub fn emit_terminator(
 					instructions.push(MovIntoAddressFromReg((RBP, continuation_parameter_offset), RAX));
 				} else {
 					()
+				}
+
+				if let Some((phi_buffer_projection, phi_buffer_offset)) = phi_buffer {
+					if codomain_size == 0 {
+						()
+					} else if codomain_size == 8 {
+						instructions.push(MovIntoAddressFromReg((RBP, phi_buffer_offset), RAX));
+					} else {
+						()
+					}
+
+					stack_frame.emit_drops(continuation_label.clone(), instructions, symbol_generator);
+
+					if codomain_size == 0 {
+						()
+					} else if codomain_size == 8 {
+						instructions.push(MovFromAddress(RAX, (RBP, phi_buffer_offset)));
+						instructions.push(MovIntoAddressFromReg((RBP, continuation_parameter_offset), RAX));
+					} else {
+						stack_frame.emit_load::<false>(RSI, &phi_buffer_projection, instructions);
+						instructions.extend([
+							MovFromReg(RDI, RBP),
+							AddFromI32(RDI, continuation_parameter_offset),
+							MovFromU64(RCX, u64::from(codomain_size)),
+							RepMovsb,
+						]);
+					}
+				} else {
+					panic!("attempted to return to continuation without a buffer for continuation argument");
 				}
 
 				instructions.push(Jmp(emit_block_local_label(continuation.clone())));
@@ -1253,21 +1247,22 @@ pub fn emit_terminator(
 				None
 			};
 
-			stack_frame.emit_clones(symbol_generator, argument, instructions);
-
 			let phi_buffer = if let Some((continuation_label, (_, _))) = continuation_and_parameter {
 				if let FireflyOperand::Copy(projection) = argument {
-					if projection.root
-						== CypressVariable::Local(
-							stack_frame.continuation_to_parameter.get(continuation_label).unwrap().clone(),
-						) && projection.is_indirect()
-					{
-						let [phi_buffer_label] = symbol_generator.fresh();
-						let phi_buffer_offset = stack_frame.allocate(phi_buffer_label, domain.clone(), false);
-						Some((
-							FireflyProjection::new(CypressVariable::Local(phi_buffer_label)),
-							phi_buffer_offset,
-						))
+					if let CypressVariable::Local(root) = projection.root {
+						if stack_frame.current_visibles.contains(&root)
+							&& stack_frame.continuation_to_visibles[continuation_label].contains(&root)
+							&& projection.is_indirect()
+						{
+							let [phi_buffer_label] = symbol_generator.fresh();
+							let phi_buffer_offset = stack_frame.allocate(phi_buffer_label, domain.clone(), false);
+							Some((
+								FireflyProjection::new(CypressVariable::Local(phi_buffer_label)),
+								phi_buffer_offset,
+							))
+						} else {
+							None
+						}
 					} else {
 						None
 					}
@@ -1277,6 +1272,8 @@ pub fn emit_terminator(
 			} else {
 				None
 			};
+
+			stack_frame.emit_clones(symbol_generator, argument, instructions);
 
 			match argument {
 				FireflyOperand::Copy(projection) => {
