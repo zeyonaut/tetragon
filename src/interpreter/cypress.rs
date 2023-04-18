@@ -59,17 +59,15 @@ pub enum CypressOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CypressTerm {
+pub enum CypressStatement {
 	AssignValue {
 		binding: Label,
 		ty: CypressType,
 		value: CypressPrimitive,
-		rest: Box<Self>,
 	},
 	AssignOperation {
 		binding: Label,
 		operation: CypressOperation,
-		rest: Box<Self>,
 	},
 	DeclareFunction {
 		binding: Label,
@@ -77,17 +75,26 @@ pub enum CypressTerm {
 		domain: CypressType,
 		codomain: CypressType,
 		parameter: Label,
-		body: Box<Self>,
-		rest: Box<Self>,
+		body: Box<CypressTerm>,
 	},
 	DeclareContinuation {
 		label: Label,
 		domain: CypressType,
 		parameter: Label,
-		body: Box<Self>,
-		rest: Box<Self>,
+		body: Box<CypressTerm>,
 	},
-	CaseSplit {
+}
+
+impl CypressStatement {
+	pub fn prepend_to(self, mut term: CypressTerm) -> CypressTerm {
+		term.statements.insert(0, self);
+		term
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CypressTerminator {
+	Branch {
 		scrutinee: CypressProjection,
 		yes_continuation: Label,
 		no_continuation: Label,
@@ -99,9 +106,37 @@ pub enum CypressTerm {
 		continuation: Option<Label>,
 		argument: CypressProjection,
 	},
-	Continue {
+	Jump {
 		continuation_label: Option<Label>,
 		argument: CypressProjection,
 		domain: CypressType,
 	},
+}
+
+impl From<CypressTerminator> for CypressTerm {
+	fn from(value: CypressTerminator) -> Self {
+		Self::new(vec![], value)
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CypressTerm {
+	pub statements: Vec<CypressStatement>,
+	pub terminator: CypressTerminator,
+}
+
+impl CypressTerm {
+	pub fn new(statements: Vec<CypressStatement>, terminator: CypressTerminator) -> Self {
+		Self { statements, terminator }
+	}
+
+	pub fn compose(mut statements: Vec<CypressStatement>, mut term: Self) -> Self {
+		Self {
+			statements: {
+				statements.append(&mut term.statements);
+				statements
+			},
+			terminator: term.terminator,
+		}
+	}
 }

@@ -9,7 +9,7 @@ use crate::{
 			FireflyProgram, FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyType,
 		},
 	},
-	utility::slice::{slice, Slice},
+	utility::slice::Slice,
 };
 
 pub enum NASMDefinition {
@@ -74,7 +74,6 @@ pub enum NASMInstruction {
 	Pop(NASMRegister64),
 	AddFromU32(NASMRegister64, u32),
 	AddFromI32(NASMRegister64, i32),
-	AddFromRBPMinus(NASMRegister64, u32),
 	AddFromAddress(NASMRegister64, (NASMRegister64, i32)),
 	AddFromReg(NASMRegister64, NASMRegister64),
 	AddSXIntoAddressFromI32((NASMRegister64, i32), i32),
@@ -114,7 +113,6 @@ impl NASMInstruction {
 			Pop(reg) => format!("pop {reg}"),
 			AddFromU32(reg, imm) => format!("add {reg}, {imm}"),
 			AddFromI32(reg, imm) => format!("add {reg}, {imm}"),
-			AddFromRBPMinus(reg, offset) => format!("add {reg}, [rbp - {offset}]"),
 			AddFromAddress(dst, (src, offset)) => format!("add {dst}, [{src} + {offset}]"),
 			AddFromReg(reg_dst, reg_src) => format!("add {reg_dst}, {reg_src}"),
 			AddSXIntoAddressFromI32((dst, offset), imm) => format!("add qword [{dst} + {offset}], {imm}"),
@@ -193,7 +191,6 @@ impl StackFrame {
 
 	// Returns the labels visible before the phi node was allocated.
 	pub fn allocate_phi(&mut self, continuation: Label, parameter: Label, ty: FireflyType) -> HashSet<Label> {
-		let current_frame_pointer_offset = self.current_frame_pointer_offset;
 		let current_visibles = self.current_visibles.clone();
 		self.continuation_to_visibles.insert(continuation, current_visibles.clone());
 		self.continuation_to_parameter.insert(continuation, parameter.clone());
@@ -402,7 +399,7 @@ impl StackFrame {
 					}
 				}
 			},
-			CypressVariable::Global(ref test) => unimplemented!(),
+			CypressVariable::Global(_) => unimplemented!(),
 		}
 	}
 
@@ -721,7 +718,7 @@ pub fn emit_term(
 ) -> Option<Vec<NASMInstruction>> {
 	let mut instructions = Vec::new();
 
-	for statement in term.statements.iter().rev() {
+	for statement in &term.statements {
 		emit_statement(
 			destructors,
 			block_stack,
@@ -734,7 +731,6 @@ pub fn emit_term(
 	}
 
 	emit_terminator(
-		destructors,
 		mailbox_offset,
 		&term.terminator,
 		&mut instructions,
@@ -1050,7 +1046,6 @@ pub fn emit_statement(
 }
 
 pub fn emit_terminator(
-	destructors: &HashMap<Slice<FireflyType>, String>,
 	mailbox_offset: Option<i32>,
 	terminator: &FireflyTerminator,
 	instructions: &mut Vec<NASMInstruction>,

@@ -1,0 +1,6 @@
+fib3 :: {n Int} {loop &} (n, 0, 1) {x} -> Int [
+	[x.0 =? 0] ?
+	no  | loop << (#add x.0 -1, x.2, #add x.1 x.2)
+	yes | loop >> x.1
+]
+fib3 40

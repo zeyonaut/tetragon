@@ -80,6 +80,21 @@ pub enum ParsedTerm {
 		scrutinee: Box<Self>,
 		cases: ParsedCases,
 	},
+	Loop {
+		loop_name: String,
+		argument: Box<Self>,
+		parameter: String,
+		codomain: ParsedType,
+		body: Box<Self>,
+	},
+	Step {
+		loop_name: String,
+		argument: Box<Self>,
+	},
+	Emit {
+		loop_name: String,
+		argument: Box<Self>,
+	},
 }
 
 #[derive(Clone, Debug)]
@@ -166,6 +181,15 @@ fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Nod
 				},
 				[Tx(OpenCurly), Tx(Name(binding)), Tx(Arrova), Tx(CloseCurly), Nx(Node::Term(body))] => {
 					Node::Term(ParsedTerm::Fixpoint { binding, body: Box::new(body) })
+				},
+				[Tx(OpenCurly), Tx(Name(loop_name)), Tx(Ampersand), Tx(CloseCurly), Nx(Node::Term(argument)), Tx(OpenCurly), Tx(Name(parameter)), Tx(CloseCurly), Tx(Arrow), Nx(Node::Type(codomain)), Nx(Node::Term(body))] => {
+					Node::Term(ParsedTerm::Loop { loop_name, argument: Box::new(argument), parameter, codomain, body: Box::new(body) })
+				},
+				[Tx(Name(loop_name)), Tx(Step), Nx(Node::Term(body))] => {
+					Node::Term(ParsedTerm::Step { loop_name, argument: Box::new(body) })
+				},
+				[Tx(Name(loop_name)), Tx(Emit), Nx(Node::Term(body))] => {
+					Node::Term(ParsedTerm::Emit { loop_name, argument: Box::new(body) })
 				},
 				_ => Node::Fail,
 			}
@@ -309,6 +333,9 @@ impl Parser {
 				[!OpenCurly, !Name, @Type, !CloseCurly, !Arrow, @DelimitedType, @DelimitedValue],   // Lambda binding
 				[!OpenCurly, !Name, @Type, !CloseCurly, @DelimitedValue],   // Lambda binding
 				[!OpenCurly, !Name, !Arrova, !CloseCurly, @DelimitedValue], // Mu binding
+				[!OpenCurly, !Name, !Ampersand, !CloseCurly, @DelimitedValue, !OpenCurly, !Name, !CloseCurly, !Arrow, @DelimitedType, @DelimitedValue], // Loop
+				[!Name, !Step, @DelimitedValue],
+				[!Name, !Emit, @DelimitedValue],
 			]
 			SmallValue => [
 				[!IntegerLiteral],

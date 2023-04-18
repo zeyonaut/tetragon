@@ -8,13 +8,61 @@ use crate::{
 };
 
 #[derive(Clone)]
+pub struct LoopTypes {
+	domain: BaseType,
+	codomain: BaseType,
+}
+
+#[derive(Clone)]
 pub struct Context {
 	tys: Vec<(BaseVariable, BaseType)>,
+	loops: Vec<(Label, LoopTypes)>,
+}
+
+pub struct Renamer {
+	names: HashMap<Label, String>,
+	numbers: HashMap<String, Label>,
+	loop_numbers: HashMap<String, Label>,
+}
+
+impl Renamer {
+	pub fn new() -> Self {
+		Self {
+			names: HashMap::new(),
+			numbers: HashMap::new(),
+			loop_numbers: HashMap::new(),
+		}
+	}
+
+	pub fn insert(&mut self, name: String, number: Label) -> Option<(String, Label)> {
+		let shadow = self.get_label(&name).map(|label| (name.clone(), label));
+		self.names.insert(number, name.clone());
+		self.numbers.insert(name, number);
+		shadow
+	}
+
+	pub fn unshadow(&mut self, shadow: Option<(String, Label)>) {
+		if let Some((name, label)) = shadow {
+			self.numbers.insert(name, label);
+		}
+	}
+
+	pub fn insert_loop(&mut self, name: String, number: Label) {
+		self.loop_numbers.insert(name, number);
+	}
+
+	pub fn get_label(&self, name: &String) -> Option<Label> {
+		self.numbers.get(name).copied()
+	}
+
+	pub fn get_loop_label(&self, name: &String) -> Option<Label> {
+		self.loop_numbers.get(name).copied()
+	}
 }
 
 impl Context {
 	pub fn new(tys: Vec<(BaseVariable, BaseType)>) -> Self {
-		Self { tys }
+		Self { tys, loops: vec![] }
 	}
 
 	pub fn find(&self, name: &BaseVariable) -> Option<BaseType> {
@@ -30,8 +78,36 @@ impl Context {
 		Self {
 			tys: {
 				let mut tys = self.tys.clone();
-				tys.push((name.to_owned(), ty.into()));
+				tys.push((name, ty));
 				tys
+			},
+			loops: self.loops.clone(),
+		}
+	}
+
+	pub fn clear_loops(&self) -> Self {
+		Self {
+			tys: self.tys.clone(),
+			loops: Vec::new(),
+		}
+	}
+
+	pub fn find_loop(&self, name: &Label) -> Option<LoopTypes> {
+		for (test, ty) in self.loops.iter().rev() {
+			if test == name {
+				return Some(ty.clone());
+			}
+		}
+		None
+	}
+
+	pub fn extend_loop(&self, label: Label, domain: BaseType, codomain: BaseType) -> Self {
+		Self {
+			tys: self.tys.clone(),
+			loops: {
+				let mut loops = self.loops.clone();
+				loops.push((label, LoopTypes { domain, codomain }));
+				loops
 			},
 		}
 	}
@@ -60,17 +136,15 @@ pub fn elaborate_term(
 	context: Context,
 	parsed_term: ParsedTerm,
 	expected_ty: Option<BaseType>,
-	names: &mut HashMap<Label, String>,
-	numbers: &mut HashMap<String, Label>,
+	renamer: &mut Renamer,
 	symbol_generator: &mut LabelGenerator,
 ) -> Option<BaseTerm> {
 	match (expected_ty, parsed_term) {
 		(None, ParsedTerm::Polarity(pole)) => Some(BaseTerm::Polarity(pole)),
 		(None, ParsedTerm::Integer(x)) => Some(BaseTerm::Integer(x)),
 		(None, ParsedTerm::Name(name)) => {
-			let variable = numbers
-				.get(&name)
-				.copied()
+			let variable = renamer
+				.get_label(&name)
 				.map_or(BaseVariable::Name(name), |number| BaseVariable::Auto(number));
 
 			let ty = context.find(&variable)?;
@@ -80,7 +154,7 @@ pub fn elaborate_term(
 		(None, ParsedTerm::Tuple(tuple)) => {
 			let typed_terms = tuple
 				.into_iter()
-				.map(move |parsed_term| elaborate_term(context.clone(), parsed_term, None, names, numbers, symbol_generator))
+				.map(move |parsed_term| elaborate_term(context.clone(), parsed_term, None, renamer, symbol_generator))
 				.collect::<Option<Vec<_>>>()
 				.map(|v| {
 					v.into_iter()
@@ -91,7 +165,7 @@ pub fn elaborate_term(
 			Some(BaseTerm::Tuple(typed_terms))
 		},
 		(None, ParsedTerm::Projection { tuple, index }) => {
-			let tuple = elaborate_term(context, *tuple, None, names, numbers, symbol_generator)?;
+			let tuple = elaborate_term(context, *tuple, None, renamer, symbol_generator)?;
 			match tuple.ty() {
 				BaseType::Product(product) => Some(BaseTerm::Projection {
 					ty: product.get(index).cloned()?,
@@ -117,25 +191,20 @@ pub fn elaborate_term(
 				None
 			};
 
-			let shadowed_parameter_number = numbers.get(&parameter).copied();
 			let [bound_parameter_number] = symbol_generator.fresh();
-			names.insert(bound_parameter_number, parameter.clone());
-			numbers.insert(parameter.clone(), bound_parameter_number);
+			let parameter_shadow = renamer.insert(parameter.clone(), bound_parameter_number);
 
 			let body = elaborate_term(
-				context.extend(BaseVariable::Auto(bound_parameter_number), domain.clone()),
+				context.clear_loops().extend(BaseVariable::Auto(bound_parameter_number), domain.clone()),
 				*body,
 				codomain.clone(),
-				names,
-				numbers,
+				renamer,
 				symbol_generator,
 			)?;
 
 			let codomain = body.ty();
 
-			if let Some(shadowed_parameter_number) = shadowed_parameter_number {
-				numbers.insert(parameter, shadowed_parameter_number);
-			}
+			renamer.unshadow(parameter_shadow);
 
 			Some(BaseTerm::Function {
 				fixpoint_name: None,
@@ -162,18 +231,15 @@ pub fn elaborate_term(
 				let domain = elaborate_ty(domain)?;
 				let codomain = elaborate_ty(codomain?)?;
 
-				let shadowed_fixpoint_number = numbers.get(&parameter).copied();
 				let [bound_fixpoint_number] = symbol_generator.fresh();
-				names.insert(bound_fixpoint_number, mu_binding.clone());
-				numbers.insert(mu_binding.clone(), bound_fixpoint_number);
+				let mu_shadow = renamer.insert(mu_binding.clone(), bound_fixpoint_number);
 
-				let shadowed_parameter_number = numbers.get(&parameter).copied();
 				let [bound_parameter_number] = symbol_generator.fresh();
-				names.insert(bound_parameter_number, parameter.clone());
-				numbers.insert(parameter.clone(), bound_parameter_number);
+				let parameter_shadow = renamer.insert(parameter.clone(), bound_parameter_number);
 
 				let body = elaborate_term(
 					context
+						.clear_loops()
 						.extend(
 							BaseVariable::Auto(bound_fixpoint_number),
 							BaseType::Power {
@@ -184,18 +250,12 @@ pub fn elaborate_term(
 						.extend(BaseVariable::Auto(bound_parameter_number), domain.clone()),
 					(*lambda_body).clone(),
 					Some(codomain.clone()),
-					names,
-					numbers,
+					renamer,
 					symbol_generator,
 				)?;
 
-				if let Some(shadowed_parameter_number) = shadowed_parameter_number {
-					numbers.insert(parameter, shadowed_parameter_number);
-				}
-
-				if let Some(shadowed_fixpoint_number) = shadowed_fixpoint_number {
-					numbers.insert(mu_binding, shadowed_fixpoint_number);
-				}
+				renamer.unshadow(parameter_shadow);
+				renamer.unshadow(mu_shadow);
 
 				Some(BaseTerm::Function {
 					fixpoint_name: Some(bound_fixpoint_number),
@@ -209,9 +269,9 @@ pub fn elaborate_term(
 			}
 		},
 		(None, ParsedTerm::Application { function, argument }) => {
-			let function = elaborate_term(context.clone(), *function, None, names, numbers, symbol_generator)?;
+			let function = elaborate_term(context.clone(), *function, None, renamer, symbol_generator)?;
 			if let BaseType::Power { domain, codomain } = function.ty() {
-				let argument = elaborate_term(context, *argument, Some(*domain), names, numbers, symbol_generator)?;
+				let argument = elaborate_term(context, *argument, Some(*domain), renamer, symbol_generator)?;
 				Some(BaseTerm::Application {
 					codomain: *codomain,
 					function: Box::new(function),
@@ -225,8 +285,8 @@ pub fn elaborate_term(
 			"add" => {
 				match_slice! { arguments.into_boxed_slice();
 					[term_0, term_1] => {
-						let term_0 = elaborate_term(context.clone(), term_0, Some(BaseType::Integer), names, numbers, symbol_generator)?;
-						let term_1 = elaborate_term(context, term_1, Some(BaseType::Integer), names, numbers, symbol_generator)?;
+						let term_0 = elaborate_term(context.clone(), term_0, Some(BaseType::Integer), renamer, symbol_generator)?;
+						let term_1 = elaborate_term(context, term_1, Some(BaseType::Integer), renamer, symbol_generator)?;
 						Some(BaseTerm::IntrinsicInvocation { intrinsic: BaseIntrinsic::Add, arguments: vec![term_0, term_1] })
 					},
 					_ => None,
@@ -242,25 +302,20 @@ pub fn elaborate_term(
 				rest,
 			},
 		) => {
-			let definition = elaborate_term(context.clone(), *definition, None, names, numbers, symbol_generator)?;
+			let definition = elaborate_term(context.clone(), *definition, None, renamer, symbol_generator)?;
 
-			let shadowed_assignee_number = numbers.get(&binding).copied();
 			let [bound_assignee_number] = symbol_generator.fresh();
-			names.insert(bound_assignee_number, binding.clone());
-			numbers.insert(binding.clone(), bound_assignee_number);
+			let assignee_shadow = renamer.insert(binding.clone(), bound_assignee_number);
 
 			let rest = elaborate_term(
 				context.extend(BaseVariable::Auto(bound_assignee_number), definition.ty()),
 				*rest,
 				None,
-				names,
-				numbers,
+				renamer,
 				symbol_generator,
 			)?;
 
-			if let Some(shadowed_assignee_number) = shadowed_assignee_number {
-				numbers.insert(binding, shadowed_assignee_number);
-			}
+			renamer.unshadow(assignee_shadow);
 
 			Some(BaseTerm::Assignment {
 				ty: rest.ty(),
@@ -270,9 +325,9 @@ pub fn elaborate_term(
 			})
 		},
 		(None, ParsedTerm::EqualityQuery { left, right }) => {
-			let left = elaborate_term(context.clone(), *left, None, names, numbers, symbol_generator)?;
+			let left = elaborate_term(context.clone(), *left, None, renamer, symbol_generator)?;
 			let ty = left.ty();
-			let right = elaborate_term(context, *right, Some(ty.clone()), names, numbers, symbol_generator)?;
+			let right = elaborate_term(context, *right, Some(ty.clone()), renamer, symbol_generator)?;
 			Some(BaseTerm::EqualityQuery {
 				ty,
 				left: Box::new(left),
@@ -280,13 +335,13 @@ pub fn elaborate_term(
 			})
 		},
 		(None, ParsedTerm::CaseSplit { scrutinee, cases }) => {
-			let scrutinee = elaborate_term(context.clone(), *scrutinee, None, names, numbers, symbol_generator)?;
+			let scrutinee = elaborate_term(context.clone(), *scrutinee, None, renamer, symbol_generator)?;
 			match_slice! {cases.cases.into_boxed_slice();
 				[(case_0, body_0), (case_1, body_1)] => {
 					// Ensure that the case split is exhaustive.
 					if case_0 ^ case_1 {
-						let body_0 = elaborate_term(context.clone(), *body_0, None, names, numbers, symbol_generator)?;
-						let body_1 = elaborate_term(context, *body_1, Some(body_0.ty()), names, numbers, symbol_generator)?;
+						let body_0 = elaborate_term(context.clone(), *body_0, None, renamer, symbol_generator)?;
+						let body_1 = elaborate_term(context, *body_1, Some(body_0.ty()), renamer, symbol_generator)?;
 						Some(BaseTerm::CaseSplit {
 							ty: body_0.ty(),
 							scrutinee: Box::new(scrutinee),
@@ -299,18 +354,70 @@ pub fn elaborate_term(
 				_ => None,
 			}
 		},
-		(Some(expected_ty), parsed_term) => elaborate_term(context, parsed_term, None, names, numbers, symbol_generator)
+		(
+			None,
+			ParsedTerm::Loop {
+				loop_name,
+				argument,
+				parameter,
+				codomain,
+				body,
+			},
+		) => {
+			let codomain = elaborate_ty(codomain)?;
+
+			let argument = elaborate_term(context.clone(), *argument, None, renamer, symbol_generator)?;
+
+			let domain = argument.ty();
+
+			let [bound_loop_number] = symbol_generator.fresh();
+			renamer.insert_loop(loop_name.clone(), bound_loop_number);
+
+			let [bound_parameter_number] = symbol_generator.fresh();
+			let parameter_shadow = renamer.insert(parameter.clone(), bound_parameter_number);
+
+			let body_context = context
+				.extend(BaseVariable::Auto(bound_parameter_number), domain.clone())
+				.extend_loop(bound_loop_number, domain.clone(), codomain.clone());
+
+			let body = elaborate_term(body_context, *body, Some(BaseType::Empty), renamer, symbol_generator)?;
+
+			renamer.unshadow(parameter_shadow);
+
+			Some(BaseTerm::Loop {
+				domain,
+				codomain,
+				loop_name: bound_loop_number,
+				parameter: bound_parameter_number,
+				argument: Box::new(argument),
+				body: Box::new(body),
+			})
+		},
+		(None, ParsedTerm::Step { loop_name, argument }) => {
+			let loop_name = renamer.get_loop_label(&loop_name)?;
+			let domain = context.find_loop(&loop_name)?.domain;
+			let argument = elaborate_term(context.clone(), *argument, Some(domain), renamer, symbol_generator)?;
+			Some(BaseTerm::Step {
+				loop_name,
+				argument: Box::new(argument),
+			})
+		},
+		(None, ParsedTerm::Emit { loop_name, argument }) => {
+			let loop_name = renamer.get_loop_label(&loop_name)?;
+			let codomain = context.find_loop(&loop_name)?.codomain;
+			let argument = elaborate_term(context.clone(), *argument, Some(codomain), renamer, symbol_generator)?;
+			Some(BaseTerm::Emit {
+				loop_name,
+				argument: Box::new(argument),
+			})
+		},
+		(Some(expected_ty), parsed_term) => elaborate_term(context, parsed_term, None, renamer, symbol_generator)
 			.filter(|typed_term| typed_term.ty() == expected_ty),
 	}
 }
 
-pub fn elaborate_program(
-	parsed_term: ParsedTerm,
-	symbol_generator: &mut LabelGenerator,
-) -> Option<(BaseTerm, HashMap<Label, String>)> {
-	let mut names = HashMap::new();
-	let mut numbers = HashMap::new();
-
+pub fn elaborate_program(parsed_term: ParsedTerm, symbol_generator: &mut LabelGenerator) -> Option<BaseTerm> {
+	let mut renamer = Renamer::new();
 	let term = elaborate_term(
 		Context::new(vec![
 			(
@@ -333,10 +440,9 @@ pub fn elaborate_program(
 		]),
 		parsed_term,
 		None,
-		&mut names,
-		&mut numbers,
+		&mut renamer,
 		symbol_generator,
 	)?;
 
-	Some((term, names))
+	Some(term)
 }

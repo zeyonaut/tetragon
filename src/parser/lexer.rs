@@ -8,6 +8,7 @@ use crate::{generator::terminal::*, utility::pow::impl_downset_for_repr_enum};
 create_token_and_terminal_types! {
 	#[derive(Debug)]
 	pub enum Token {
+		Ampersand,
 		Arrova,
 		Arrow,
 		Asterisk,
@@ -17,15 +18,17 @@ create_token_and_terminal_types! {
 		CloseOrtho,
 		CloseParen,
 		Comma,
+		Emit,
 		EqualsQuestion,
 		IntegerLiteral(i64),
-		Name(String),
 		Intrinsic(String),
+		Name(String),
 		OpenCurly,
 		OpenOrtho,
 		OpenParen,
 		Period,
 		Question,
+		Step,
 	}
 
 	#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Sequence)]
@@ -150,6 +153,7 @@ impl<'source> Iterator for Lexer<'source> {
 		use Token::*;
 		while self.scanner.next_if(|&x| x.is_ascii_whitespace()).is_some() {}
 		Some(match self.scanner.next()? {
+			'&' => Ok(Ampersand),
 			'@' => Ok(Arrova),
 			'-' => self
 				.scanner
@@ -169,6 +173,13 @@ impl<'source> Iterator for Lexer<'source> {
 			']' => Ok(CloseOrtho),
 			')' => Ok(CloseParen),
 			',' => Ok(Comma),
+			'>' => self.scanner.next_if_eq(&'>').map(|_| Ok(Emit)).unwrap_or_else(|| {
+				Err(UnknownLexeme {
+					lexeme: ">".to_owned(),
+					line: self.line(),
+					offset: self.offset(),
+				})
+			}),
 			'=' => self.scanner.next_if_eq(&'?').map(|_| Ok(EqualsQuestion)).unwrap_or_else(|| {
 				Err(UnknownLexeme {
 					lexeme: "=".to_owned(),
@@ -181,6 +192,13 @@ impl<'source> Iterator for Lexer<'source> {
 			'(' => Ok(OpenParen),
 			'.' => Ok(Period),
 			'?' => Ok(Question),
+			'<' => self.scanner.next_if_eq(&'<').map(|_| Ok(Step)).unwrap_or_else(|| {
+				Err(UnknownLexeme {
+					lexeme: "<".to_owned(),
+					line: self.line(),
+					offset: self.offset(),
+				})
+			}),
 			x if x.is_ascii_alphabetic() => Ok(lex_name(x, &mut self.scanner)),
 			x if x.is_ascii_digit() || x == '+' => lex_integer(x, &mut self.scanner),
 			'#' => Ok(lex_intrinsic(&mut self.scanner)),

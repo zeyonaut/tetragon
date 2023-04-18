@@ -56,6 +56,22 @@ pub enum BaseTerm {
 		scrutinee: Box<Self>,
 		cases: Vec<(bool, Box<Self>)>,
 	},
+	Loop {
+		domain: BaseType,
+		codomain: BaseType,
+		loop_name: Label,
+		parameter: Label,
+		argument: Box<Self>,
+		body: Box<Self>,
+	},
+	Step {
+		loop_name: Label,
+		argument: Box<Self>,
+	},
+	Emit {
+		loop_name: Label,
+		argument: Box<Self>,
+	},
 }
 
 impl BaseTerm {
@@ -101,12 +117,29 @@ impl BaseTerm {
 				scrutinee: _,
 				cases: _,
 			} => ty.clone(),
+			Self::Loop {
+				domain: _,
+				codomain,
+				loop_name: _,
+				parameter: _,
+				argument: _,
+				body: _,
+			} => codomain.clone(),
+			Self::Step {
+				loop_name: _,
+				argument: _,
+			} => BaseType::Empty,
+			Self::Emit {
+				loop_name: _,
+				argument: _,
+			} => BaseType::Empty,
 		}
 	}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BaseType {
+	Empty,
 	Polarity,
 	Integer,
 	Product(Vec<Self>),
@@ -279,6 +312,22 @@ pub fn interpret_base(base_term: BaseTerm, environment: BaseEnvironment) -> Opti
 				}
 			}
 			expression
+		},
+		Loop {
+			domain,
+			codomain,
+			loop_name,
+			parameter,
+			argument,
+			body,
+		} => {
+			unimplemented!();
+		},
+		Step { loop_name, argument } => {
+			unimplemented!();
+		},
+		Emit { loop_name, argument } => {
+			unimplemented!();
 		},
 	}
 }

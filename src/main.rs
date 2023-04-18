@@ -42,7 +42,7 @@ use utility::*;
 use crate::{
 	interpreter::base::{evaluate_base, interpret_base, BaseEnvironment, BaseValue, BaseVariable},
 	translator::{
-		cps::{convert_program_to_cps, convert_type_to_cps},
+		cps::{convert_program_to_cps, convert_ty_to_cps},
 		elaborator::elaborate_program,
 		hoister::hoist_program,
 		nasm_win64,
@@ -67,50 +67,42 @@ fn main() {
 	if let Node::Term(parsed_term) = expression {
 		let mut symbol_generator = LabelGenerator::new();
 
-		let (elaborated_term, _) = elaborate_program(parsed_term, &mut symbol_generator).expect("Elaboration failed.");
+		let elaborated_term = elaborate_program(parsed_term, &mut symbol_generator).expect("Elaboration failed.");
 
 		// println!("Elaborated term: {:#?}", elaborated_term);
 
 		use std::time::Instant;
 
-		let now = Instant::now();
+		//let now = Instant::now();
 
 		//let interpreted_value = evaluate_base(elaborated_term.clone());
 
-		let elapsed = now.elapsed();
+		//let elapsed = now.elapsed();
 
-		println!("Elapsed (Base): {:.2?}", elapsed);
+		//println!("Elapsed (Base): {:.2?}", elapsed);
 
 		//println!("Interpreted value: {:#?}", interpreted_value);
 
-		let cypress_ty = convert_type_to_cps(elaborated_term.ty());
+		let cypress_ty = convert_ty_to_cps(elaborated_term.ty());
 		let cypress_term =
 			convert_program_to_cps(elaborated_term, &mut symbol_generator).expect("Failed to convert base term to CPS.");
 
-		// println!("CPS-converted term: {:#?}", cypress_term);
-
-		let now = Instant::now();
-
-		//let cypress_value = cypress_term.clone().evaluate(symbol_generator.clone());
-
-		let elapsed = now.elapsed();
-
-		println!("Elapsed (CPS): {:.2?}", elapsed);
-
-		//println!("CPS-converted value: {:#?}", cypress_value);
+		//println!("CPS-converted term: {:#?}", cypress_term);
 
 		let firefly_program = hoist_program(cypress_term, cypress_ty, &mut symbol_generator);
 
 		//println!("Hoisted program: {:#?}", firefly_program);
 
+		/*
 		let now = Instant::now();
 
-		//let firefly_value = firefly_program.clone().evaluate();
+		let firefly_value = firefly_program.clone().evaluate();
 
 		let elapsed = now.elapsed();
 
 		println!("Elapsed (Firefly): {:#?}", elapsed);
-		//println!("Firefly value: {:#?}", firefly_value);
+		println!("Firefly value: {:#?}", firefly_value);
+		*/
 
 		let program = nasm_win64::emit_program(firefly_program).map(nasm_win64::emit_assembly);
 

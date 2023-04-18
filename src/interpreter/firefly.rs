@@ -195,7 +195,6 @@ pub enum FireflyTerminator {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FireflyTerm {
-	// Stored as a stack: the last statement is the first to execute.
 	pub statements: Vec<FireflyStatement>,
 	pub terminator: FireflyTerminator,
 }
@@ -241,7 +240,7 @@ impl FireflyProgram {
 		let mut continuations: HashMap<Label, FireflyContinuation> = HashMap::new();
 		let mut environment = HashMap::<Label, FireflyValue>::new();
 		loop {
-			for statement in term.statements.iter().rev() {
+			for statement in &term.statements {
 				match statement {
 					FireflyStatement::Assign { binding, operation } => {
 						environment.insert(binding.clone(), operation.evaluate(&intrinsics, &environment)?);
