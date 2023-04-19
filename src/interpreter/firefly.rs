@@ -211,12 +211,10 @@ impl FireflyTerm {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FireflyProcedure {
 	pub capture: Option<(Label, Slice<FireflyType>)>,
-	// TODO: Add type of environment. (a slice of types would be most convenient)
 	pub parameter: Option<Label>,
 	pub domain: FireflyType,
 	pub body: FireflyTerm,
 	pub codomain: FireflyType,
-	// TODO: Add codomain.
 }
 
 #[derive(Clone, Debug)]

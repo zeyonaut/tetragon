@@ -531,7 +531,7 @@ pub fn emit_main(entry: Label, codomain: FireflyType, globals: &mut HashMap<Stri
 			MovIntoAddressFromReg((RBP, return_offset), RAX),
 		]);
 	} else {
-		()
+		instructions.push(CallLabel(emit_procedure_label(entry)));
 	}
 
 	let mut offsets_iter = format_offsets.into_iter();

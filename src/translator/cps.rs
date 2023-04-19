@@ -115,25 +115,9 @@ fn convert_expression_to_cps(
 			))
 		},
 		BaseTerm::Projection { ty, tuple, index } => {
-			let [binding] = symbol_generator.fresh();
-
 			let (tuple_variable, tuple_context) = convert_expression_to_cps(*tuple, loop_stack, symbol_generator)?;
 
-			Some((
-				CypressProjection::new(CypressVariable::Local(binding)),
-				Box::new(move |body| {
-					tuple_context(
-						CypressStatement::AssignOperation {
-							binding,
-							operation: CypressOperation::Id(
-								convert_ty_to_cps(ty),
-								tuple_variable.project(CypressProjector::Field(index)),
-							),
-						}
-						.prepend_to(body),
-					)
-				}),
-			))
+			Some((tuple_variable.project(CypressProjector::Field(index)), tuple_context))
 		},
 		BaseTerm::Function {
 			fixpoint_name,
@@ -485,25 +469,17 @@ fn convert_tail_expression_to_cps(
 			))
 		},
 		BaseTerm::Projection { ty, tuple, index } => {
-			let [binding] = symbol_generator.fresh();
-
 			let (tuple_variable, tuple_context) = convert_expression_to_cps(*tuple, loop_stack, symbol_generator)?;
 
 			let ty = convert_ty_to_cps(ty);
 
 			Some(tuple_context(
-				CypressStatement::AssignOperation {
-					binding,
-					operation: CypressOperation::Id(ty.clone(), tuple_variable.project(CypressProjector::Field(index))),
+				CypressTerminator::Jump {
+					continuation_label,
+					argument: tuple_variable.project(CypressProjector::Field(index)),
+					domain: ty,
 				}
-				.prepend_to(
-					CypressTerminator::Jump {
-						continuation_label,
-						argument: CypressProjection::new(CypressVariable::Local(binding)),
-						domain: ty,
-					}
-					.into(),
-				),
+				.into(),
 			))
 		},
 		BaseTerm::Function {
