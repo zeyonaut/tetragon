@@ -195,7 +195,9 @@ pub fn elaborate_term(
 			let parameter_shadow = renamer.insert(parameter.clone(), bound_parameter_number);
 
 			let body = elaborate_term(
-				context.clear_loops().extend(BaseVariable::Auto(bound_parameter_number), domain.clone()),
+				context
+					.clear_loops()
+					.extend(BaseVariable::Auto(bound_parameter_number), domain.clone()),
 				*body,
 				codomain.clone(),
 				renamer,
@@ -378,14 +380,13 @@ pub fn elaborate_term(
 
 			let body_context = context
 				.extend(BaseVariable::Auto(bound_parameter_number), domain.clone())
-				.extend_loop(bound_loop_number, domain.clone(), codomain.clone());
+				.extend_loop(bound_loop_number, domain, codomain.clone());
 
 			let body = elaborate_term(body_context, *body, Some(BaseType::Empty), renamer, symbol_generator)?;
 
 			renamer.unshadow(parameter_shadow);
 
 			Some(BaseTerm::Loop {
-				domain,
 				codomain,
 				loop_name: bound_loop_number,
 				parameter: bound_parameter_number,

@@ -104,7 +104,7 @@ fn main() {
 		println!("Firefly value: {:#?}", firefly_value);
 		*/
 
-		let program = nasm_win64::emit_program(firefly_program).map(nasm_win64::emit_assembly);
+		let program = nasm_win64::emit_program(firefly_program);
 
 		if let Some(program) = program {
 			std::fs::write(output_path.expect("expected output argument"), program).expect("failed to write output");

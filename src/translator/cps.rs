@@ -324,13 +324,15 @@ fn convert_expression_to_cps(
 			))
 		},
 		BaseTerm::Loop {
-			domain,
 			codomain,
 			loop_name,
 			parameter,
 			argument,
 			body,
 		} => {
+			let domain = convert_ty_to_cps(argument.ty());
+			let codomain = convert_ty_to_cps(codomain);
+
 			let (step_continuation, step_parameter) = (loop_name, parameter);
 			let [emit_continuation, emit_parameter] = symbol_generator.fresh();
 
@@ -339,9 +341,6 @@ fn convert_expression_to_cps(
 			loop_stack.pop();
 			let argument_term =
 				convert_tail_expression_to_cps(*argument, Some(step_continuation), loop_stack, symbol_generator)?;
-
-			let domain = convert_ty_to_cps(domain);
-			let codomain = convert_ty_to_cps(codomain);
 
 			Some((
 				CypressProjection::new(CypressVariable::Local(emit_parameter)),
@@ -691,13 +690,14 @@ fn convert_tail_expression_to_cps(
 			))
 		},
 		BaseTerm::Loop {
-			domain,
 			codomain: _,
 			loop_name,
 			parameter,
 			argument,
 			body,
 		} => {
+			let domain = convert_ty_to_cps(argument.ty());
+
 			let emit_continuation = continuation_label;
 			let (step_continuation, step_parameter) = (loop_name, parameter);
 
@@ -707,7 +707,6 @@ fn convert_tail_expression_to_cps(
 			let argument_term =
 				convert_tail_expression_to_cps(*argument, Some(step_continuation), loop_stack, symbol_generator)?;
 
-			let domain = convert_ty_to_cps(domain);
 			Some(CypressTerm::compose(
 				vec![CypressStatement::DeclareContinuation {
 					label: step_continuation,

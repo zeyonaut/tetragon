@@ -410,17 +410,28 @@ impl StackFrame {
 	}
 }
 
-pub fn emit_assembly(procedures: Vec<NASMProcedure>) -> String {
+pub fn emit_assembly(globals: HashMap<String, NASMDefinition>, procedures: Vec<NASMProcedure>) -> String {
 	let mut assembly = r#"global main
 extern free, malloc, printf
 
 section .data
-result:
-	db "Result: %ld", 10, 0
-
-section .text
 "#
 	.to_owned();
+	for (name, definition) in globals {
+		assembly.push_str(&name);
+		assembly.push_str(":\n\t");
+		match definition {
+			NASMDefinition::ASCII(string) => {
+				assembly.push_str(format!("db `{}`, 0", string.escape_default().to_string()).as_ref())
+			},
+		}
+	}
+
+	assembly.push_str(
+		r#"
+section .text
+"#,
+	);
 
 	for procedure in procedures {
 		assembly.push_str(&format!("{}:\n", procedure.label));
@@ -450,7 +461,7 @@ pub struct NASMProcedure {
 	block_stack: Vec<NASMBlock>,
 }
 
-pub fn emit_program(program: FireflyProgram) -> Option<Vec<NASMProcedure>> {
+pub fn emit_program(program: FireflyProgram) -> Option<String> {
 	let FireflyProgram {
 		procedures: ff_procedures,
 		entry: ff_entry,
@@ -473,36 +484,121 @@ pub fn emit_program(program: FireflyProgram) -> Option<Vec<NASMProcedure>> {
 		procedures.push(emit_procedure(&mut symbol_generator, &destructors, label, ff_procedure)?);
 	}
 
-	procedures.push(emit_main(ff_entry, &mut globals));
+	let codomain = ff_procedures.get(&ff_entry)?.codomain.clone();
 
-	Some(procedures)
+	procedures.push(emit_main(ff_entry, codomain, &mut globals));
+
+	Some(emit_assembly(globals, procedures))
 }
 
-pub fn emit_main(entry: Label, globals: &mut HashMap<String, NASMDefinition>) -> NASMProcedure {
+pub fn emit_main(entry: Label, codomain: FireflyType, globals: &mut HashMap<String, NASMDefinition>) -> NASMProcedure {
 	use NASMDefinition::*;
 	use NASMInstruction::*;
 	use NASMRegister64::*;
-	// FIXME: We assume the entry procedure returns a register-sized value.
-	let result = "result".to_owned();
 
-	globals.insert(result.clone(), ASCII("Result: %ld".to_owned()));
+	let codomain_size = size_of_ty(&codomain);
+
+	let result = "result".to_owned();
+	let (format_string, format_offsets) = generate_format(codomain);
+	let result_string = format!("Result: {format_string}\n");
+	globals.insert(result.clone(), ASCII(result_string));
+
+	// We fit three arguments onto registers RCX, R8, and R9.
+	let stack_size = codomain_size + {
+		let len = format_offsets.len();
+		(if len > 3 { (len - 3) * 8 } else { 0 }) as u32
+	};
+	let stack_shadow = 32;
+	let stack_padding = (16 - ((stack_size + 8) % 16)) % 16;
+
+	let return_offset = -(codomain_size as i32);
+
+	let mut instructions = vec![
+		PushReg(RBP),
+		MovFromReg(RBP, RSP),
+		SubFromU32(RSP, stack_size + stack_shadow + stack_padding),
+	];
+
+	if codomain_size > 8 {
+		instructions.extend([
+			MovFromReg(R8, RBP),
+			AddFromI32(R8, return_offset),
+			CallLabel(emit_procedure_label(entry)),
+		]);
+	} else if codomain_size > 0 {
+		instructions.extend([
+			CallLabel(emit_procedure_label(entry)),
+			MovIntoAddressFromReg((RBP, return_offset), RAX),
+		]);
+	} else {
+		()
+	}
+
+	let mut offsets_iter = format_offsets.into_iter();
+
+	if let Some(rdx_offset) = offsets_iter.next() {
+		instructions.push(MovFromAddress(RDX, (RBP, return_offset + rdx_offset as i32)));
+	}
+
+	if let Some(r8_offset) = offsets_iter.next() {
+		instructions.push(MovFromAddress(R8, (RBP, return_offset + r8_offset as i32)));
+	}
+
+	if let Some(r9_offset) = offsets_iter.next() {
+		instructions.push(MovFromAddress(R9, (RBP, return_offset + r9_offset as i32)));
+	}
+
+	for (i, format_offset) in offsets_iter.enumerate() {
+		instructions.push(MovFromAddress(RAX, (RBP, return_offset + format_offset as i32)));
+		instructions.push(MovIntoAddressFromReg((RSP, (i * 8) as i32 + 32), RAX));
+	}
+
+	instructions.extend([
+		MovFromU64(RAX, 0),
+		MovFromLabel(RCX, result),
+		CallLabel("printf".to_owned()),
+		MovFromU64(RAX, 0),
+		Leave,
+		Ret,
+	]);
 
 	NASMProcedure {
 		label: "main".to_owned(),
-		entry: Vec::from([
-			PushReg(RBP),
-			MovFromReg(RBP, RSP),
-			SubFromU32(RSP, 0 + 32 + 8),
-			CallLabel(emit_procedure_label(entry)),
-			MovFromReg(RDX, RAX),
-			MovFromU64(RAX, 0),
-			MovFromLabel(RCX, result),
-			CallLabel("printf".to_owned()),
-			MovFromU64(RAX, 0),
-			Leave,
-			Ret,
-		]),
+		entry: instructions,
 		block_stack: Vec::new(),
+	}
+}
+
+pub fn generate_format(ty: FireflyType) -> (String, Vec<u32>) {
+	match ty {
+		FireflyType::Unity => ("*".to_owned(), vec![]),
+		FireflyType::Polarity => ("%I64d".to_owned(), vec![0]),
+		FireflyType::Integer => ("%I64d".to_owned(), vec![0]),
+		FireflyType::Product(factors) => {
+			let factors = factors.into_vec();
+			let mut string = "(".to_owned();
+			let mut offsets = vec![];
+			let mut is_leftmost = true;
+			let mut current_offset = 0;
+			for factor in factors {
+				let size = size_of_ty(&factor);
+				let (factor_string, factor_offsets) = generate_format(factor);
+				let mut factor_offsets = factor_offsets.into_iter().map(|x| x + current_offset).collect::<Vec<_>>();
+				offsets.append(&mut factor_offsets);
+				if !is_leftmost {
+					string.push_str(", ");
+					string.push_str(&factor_string);
+				} else {
+					string.push_str(&factor_string);
+					is_leftmost = false;
+				}
+				current_offset += size;
+			}
+			string.push(')');
+			(string, offsets)
+		},
+		FireflyType::Procedure => ("<proc 0x%I64x>".to_owned(), vec![0]),
+		FireflyType::Snapshot(_) => ("<snap>".to_owned(), vec![]),
 	}
 }
 
@@ -528,7 +624,6 @@ pub fn emit_drop_snapshot() -> NASMProcedure {
 			CmpWithU8(RAX, 0),
 			JNE(".skip".to_owned()),
 			MovFromAddress(RAX, (RCX, 8)),
-			MovFromReg(RCX, RCX),
 			CallReg(RAX),
 			MovFromAddress(RCX, (RBP, -8)),
 			CallLabel("free".to_owned()),

@@ -57,7 +57,6 @@ pub enum BaseTerm {
 		cases: Vec<(bool, Box<Self>)>,
 	},
 	Loop {
-		domain: BaseType,
 		codomain: BaseType,
 		loop_name: Label,
 		parameter: Label,
@@ -118,7 +117,6 @@ impl BaseTerm {
 				cases: _,
 			} => ty.clone(),
 			Self::Loop {
-				domain: _,
 				codomain,
 				loop_name: _,
 				parameter: _,
@@ -314,7 +312,6 @@ pub fn interpret_base(base_term: BaseTerm, environment: BaseEnvironment) -> Opti
 			expression
 		},
 		Loop {
-			domain,
 			codomain,
 			loop_name,
 			parameter,

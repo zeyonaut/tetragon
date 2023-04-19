@@ -1,2 +1,2 @@
 flip :: {x * (Int, Int)} (x.1, x.0)
-[flip (24, 48)].1
+flip (24, 48)

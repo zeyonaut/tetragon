@@ -5,4 +5,4 @@ fun :: {x Pol} [
 ]
 a :: 12
 b :: 13
-[fun [a =? a]].1
+fun [a =? a]
