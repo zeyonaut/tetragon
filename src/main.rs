@@ -16,8 +16,6 @@
 
 #[macro_use(btreemap, btreeset)]
 extern crate maplit;
-#[macro_use(hashmap)]
-extern crate halfbrown;
 
 #[path = "generator/_.rs"]
 mod generator;
