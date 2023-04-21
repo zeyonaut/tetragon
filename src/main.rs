@@ -30,23 +30,20 @@ mod translator;
 #[path = "utility/_.rs"]
 mod utility;
 
+use std::time::Instant;
+
 use generator::*;
 use grammar::*;
 use parser::{
 	lexer::Lexer,
 	parser::{Node, Parser},
 };
-use translator::label::LabelGenerator;
+use translator::{hoister::hoist, label::LabelGenerator, sequentializer::sequentialize};
 use utility::*;
 
 use crate::{
 	interpreter::base::{evaluate_base, interpret_base, BaseEnvironment, BaseValue, BaseVariable},
-	translator::{
-		cps::{convert_program_to_cps, convert_ty_to_cps},
-		elaborator::elaborate_program,
-		hoister::hoist_program,
-		nasm_win64,
-	},
+	translator::{elaborator::elaborate_program, nasm_win64},
 };
 
 fn main() {
@@ -67,44 +64,13 @@ fn main() {
 	if let Node::Term(parsed_term) = expression {
 		let mut symbol_generator = LabelGenerator::new();
 
-		let elaborated_term = elaborate_program(parsed_term, &mut symbol_generator).expect("Elaboration failed.");
+		let term = elaborate_program(parsed_term, &mut symbol_generator).expect("Elaboration failed.");
 
-		// println!("Elaborated term: {:#?}", elaborated_term);
+		let program = hoist(term, symbol_generator);
 
-		use std::time::Instant;
+		let program = sequentialize(program);
 
-		//let now = Instant::now();
-
-		//let interpreted_value = evaluate_base(elaborated_term.clone());
-
-		//let elapsed = now.elapsed();
-
-		//println!("Elapsed (Base): {:.2?}", elapsed);
-
-		//println!("Interpreted value: {:#?}", interpreted_value);
-
-		let cypress_ty = convert_ty_to_cps(elaborated_term.ty());
-		let cypress_term =
-			convert_program_to_cps(elaborated_term, &mut symbol_generator).expect("Failed to convert base term to CPS.");
-
-		//println!("CPS-converted term: {:#?}", cypress_term);
-
-		let firefly_program = hoist_program(cypress_term, cypress_ty, &mut symbol_generator);
-
-		//println!("Hoisted program: {:#?}", firefly_program);
-
-		/*
-		let now = Instant::now();
-
-		let firefly_value = firefly_program.clone().evaluate();
-
-		let elapsed = now.elapsed();
-
-		println!("Elapsed (Firefly): {:#?}", elapsed);
-		println!("Firefly value: {:#?}", firefly_value);
-		*/
-
-		let program = nasm_win64::emit_program(firefly_program);
+		let program = nasm_win64::emit_program(program);
 
 		if let Some(program) = program {
 			std::fs::write(output_path.expect("expected output argument"), program).expect("failed to write output");

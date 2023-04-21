@@ -2,12 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use super::label::{Label, LabelGenerator};
 use crate::{
-	interpreter::{
-		cypress::CypressVariable,
-		firefly::{
-			ff_closure_type, BinaryOperator, FireflyOperand, FireflyOperation, FireflyPrimitive, FireflyProcedure,
-			FireflyProgram, FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyType,
-		},
+	interpreter::flow::{
+		ff_closure_type, BinaryOperator, FlowOperand, FlowOperation, FlowPrimitive, FlowProcedure, FlowProgram, FlowProjection,
+		FlowProjector, FlowStatement, FlowTerm, FlowTerminator, FlowType, FlowVariable,
 	},
 	utility::slice::Slice,
 };
@@ -94,6 +91,7 @@ pub enum NASMInstruction {
 	CmpWithU8(NASMRegister64, u8),
 	CmpReg(NASMRegister64, NASMRegister64),
 	RepMovsb,
+	RepMovsq,
 	CallReg(NASMRegister64),
 	CallLabel(String),
 	LocalLabel(String),
@@ -128,6 +126,7 @@ impl NASMInstruction {
 			MovIntoAddressFromI64((dst, offset), imm) => format!("mov qword [{dst} + {offset}], {imm}"),
 			MovIntoAddressFromLabel((dst, offset), label) => format!("mov qword [{dst} + {offset}], {label}"),
 			RepMovsb => format!("rep movsb"),
+			RepMovsq => format!("rep movsq"),
 			CallReg(reg) => format!("call {reg}"),
 			CallLabel(label) => format!("call {label}"),
 			Leave => format!("leave"),
@@ -150,9 +149,9 @@ pub struct NASMBlock {
 	instructions: Vec<NASMInstruction>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct StackFrame {
-	label_to_offset_from_frame_pointer: HashMap<Label, (FireflyType, i32)>,
+	label_to_offset_from_frame_pointer: HashMap<Label, (FlowType, i32)>,
 	continuation_to_parameter: HashMap<Label, Label>,
 	current_frame_pointer_offset: i32,
 	//min_offset: i32,
@@ -178,7 +177,7 @@ impl StackFrame {
 			.fold(0, |acc, (ty, _)| acc + size_of_ty(ty))
 	}
 
-	pub fn allocate(&mut self, label: Label, ty: FireflyType, is_owning: bool) -> i32 {
+	pub fn allocate(&mut self, label: Label, ty: FlowType, is_owning: bool) -> i32 {
 		if is_owning {
 			self.current_visibles.insert(label.clone());
 		}
@@ -190,7 +189,7 @@ impl StackFrame {
 	}
 
 	// Returns the labels visible before the phi node was allocated.
-	pub fn allocate_phi(&mut self, continuation: Label, parameter: Label, ty: FireflyType) -> HashSet<Label> {
+	pub fn allocate_phi(&mut self, continuation: Label, parameter: Label, ty: FlowType) -> HashSet<Label> {
 		let current_visibles = self.current_visibles.clone();
 		self.continuation_to_visibles.insert(continuation, current_visibles.clone());
 		self.continuation_to_parameter.insert(continuation, parameter.clone());
@@ -198,31 +197,31 @@ impl StackFrame {
 		current_visibles
 	}
 
-	pub fn get(&self, label: &Label) -> Option<(FireflyType, i32)> {
+	pub fn get(&self, label: &Label) -> Option<(FlowType, i32)> {
 		self.label_to_offset_from_frame_pointer.get(&label).cloned()
 	}
 
 	fn emit_drop(
 		&self,
-		ty: FireflyType,
-		projection: &FireflyProjection,
+		ty: FlowType,
+		projection: &FlowProjection,
 		instructions: &mut Vec<NASMInstruction>,
 		symbol_generator: &mut LabelGenerator,
 	) {
 		use NASMInstruction::*;
 		use NASMRegister64::*;
 		match ty {
-			FireflyType::Product(factors) => {
+			FlowType::Product(factors) => {
 				for (i, factor) in factors.into_vec().into_iter().enumerate() {
 					self.emit_drop(
 						factor,
-						&projection.clone().project(FireflyProjector::Field(i)),
+						&projection.clone().project(FlowProjector::Field(i)),
 						instructions,
 						symbol_generator,
 					)
 				}
 			},
-			FireflyType::Snapshot(Some(requisites)) => {
+			FlowType::Snapshot(Some(requisites)) => {
 				if requisites.len() > 0 {
 					self.emit_load::<true>(RCX, projection, instructions);
 					instructions.push(CallLabel("drop_rc".to_owned()));
@@ -251,7 +250,7 @@ impl StackFrame {
 			let (ty, _) = self.get(&droppable).unwrap();
 			self.emit_drop(
 				ty,
-				&FireflyProjection::new(CypressVariable::Local(droppable)),
+				&FlowProjection::new(FlowVariable::Local(droppable)),
 				instructions,
 				symbol_generator,
 			);
@@ -261,24 +260,24 @@ impl StackFrame {
 	fn emit_clone(
 		&self,
 		symbol_generator: &mut LabelGenerator,
-		ty: FireflyType,
-		projection: &FireflyProjection,
+		ty: FlowType,
+		projection: &FlowProjection,
 		instructions: &mut Vec<NASMInstruction>,
 	) {
 		use NASMInstruction::*;
 		use NASMRegister64::*;
 		match ty {
-			FireflyType::Product(factors) => {
+			FlowType::Product(factors) => {
 				for (i, factor) in factors.into_vec().into_iter().enumerate() {
 					self.emit_clone(
 						symbol_generator,
 						factor,
-						&projection.clone().project(FireflyProjector::Field(i)),
+						&projection.clone().project(FlowProjector::Field(i)),
 						instructions,
 					)
 				}
 			},
-			FireflyType::Snapshot(_) => {
+			FlowType::Snapshot(_) => {
 				// We increment the reference counter.
 				let [skip_clone] = symbol_generator.fresh();
 
@@ -297,32 +296,32 @@ impl StackFrame {
 	pub fn emit_clones(
 		&self,
 		symbol_generator: &mut LabelGenerator,
-		operand: &FireflyOperand,
+		operand: &FlowOperand,
 		instructions: &mut Vec<NASMInstruction>,
 	) {
 		match operand {
-			FireflyOperand::Copy(projection) => {
-				if let CypressVariable::Local(local) = &projection.root {
+			FlowOperand::Copy(projection) => {
+				if let FlowVariable::Local(local) = &projection.root {
 					let (mut ty, _) = self.get(local).unwrap();
 
 					for projector in &projection.projectors {
 						match projector {
-							FireflyProjector::Parameter => continue,
-							FireflyProjector::Field(n) => {
-								if let FireflyType::Product(factors) = ty {
+							FlowProjector::Parameter => continue,
+							FlowProjector::Field(n) => {
+								if let FlowType::Product(factors) = ty {
 									ty = factors.get(*n).unwrap().clone();
 								} else {
 									panic!();
 								}
 							},
-							FireflyProjector::Free(n) => {
-								if let FireflyType::Snapshot(Some(requisites)) = ty {
+							FlowProjector::Free(n) => {
+								if let FlowType::Snapshot(Some(requisites)) = ty {
 									ty = requisites.get(*n).unwrap().clone();
 								} else {
 									panic!();
 								}
 							},
-							FireflyProjector::Dereference => unimplemented!(),
+							FlowProjector::Dereference => unimplemented!(),
 						}
 					}
 
@@ -331,26 +330,26 @@ impl StackFrame {
 					unimplemented!();
 				}
 			},
-			FireflyOperand::Constant(_) => (),
+			FlowOperand::Constant(_) => (),
 		}
 	}
 
 	pub fn emit_load<const IS_BY_VALUE: bool>(
 		&self,
 		destination: NASMRegister64,
-		projection: &FireflyProjection,
+		projection: &FlowProjection,
 		instructions: &mut Vec<NASMInstruction>,
 	) {
 		use NASMInstruction::*;
 		use NASMRegister64::*;
 		match projection.root {
-			CypressVariable::Local(local) => {
+			FlowVariable::Local(local) => {
 				let (mut ty, mut offset) = self.get(&local).unwrap();
 				let mut source = RBP;
 
 				for projector in &projection.projectors {
 					match projector {
-						FireflyProjector::Parameter => {
+						FlowProjector::Parameter => {
 							let size = size_of_ty(&ty);
 							if size <= 8 {
 								()
@@ -360,16 +359,16 @@ impl StackFrame {
 								offset = 0;
 							}
 						},
-						FireflyProjector::Field(i) => {
-							if let FireflyType::Product(factors) = ty {
+						FlowProjector::Field(i) => {
+							if let FlowType::Product(factors) = ty {
 								ty = factors.get(*i).unwrap().clone();
 								offset += factors.iter().take(*i).fold(0, |acc, ty| acc + size_of_ty(ty) as i32);
 							} else {
 								panic!("failed to get field from stack frame");
 							}
 						},
-						FireflyProjector::Free(i) => {
-							if let FireflyType::Snapshot(Some(factors)) = ty {
+						FlowProjector::Free(i) => {
+							if let FlowType::Snapshot(Some(factors)) = ty {
 								instructions.push(MovFromAddress(destination, (source, offset)));
 								source = destination;
 								offset = 0;
@@ -384,7 +383,7 @@ impl StackFrame {
 								panic!("failed to get field from stack frame");
 							}
 						},
-						FireflyProjector::Dereference => unimplemented!(),
+						FlowProjector::Dereference => unimplemented!(),
 					}
 				}
 
@@ -399,11 +398,11 @@ impl StackFrame {
 					}
 				}
 			},
-			CypressVariable::Global(_) => unimplemented!(),
+			FlowVariable::Global(_) => unimplemented!(),
 		}
 	}
 
-	pub fn get_phi(&self, continuation: &Label) -> Option<(FireflyType, i32)> {
+	pub fn get_phi(&self, continuation: &Label) -> Option<(FlowType, i32)> {
 		self.label_to_offset_from_frame_pointer
 			.get(&self.continuation_to_parameter.get(continuation).copied()?)
 			.cloned()
@@ -461,8 +460,8 @@ pub struct NASMProcedure {
 	block_stack: Vec<NASMBlock>,
 }
 
-pub fn emit_program(program: FireflyProgram) -> Option<String> {
-	let FireflyProgram {
+pub fn emit_program(program: FlowProgram) -> Option<String> {
+	let FlowProgram {
 		procedures: ff_procedures,
 		entry: ff_entry,
 		mut symbol_generator,
@@ -491,7 +490,7 @@ pub fn emit_program(program: FireflyProgram) -> Option<String> {
 	Some(emit_assembly(globals, procedures))
 }
 
-pub fn emit_main(entry: Label, codomain: FireflyType, globals: &mut HashMap<String, NASMDefinition>) -> NASMProcedure {
+pub fn emit_main(entry: Label, codomain: FlowType, globals: &mut HashMap<String, NASMDefinition>) -> NASMProcedure {
 	use NASMDefinition::*;
 	use NASMInstruction::*;
 	use NASMRegister64::*;
@@ -569,12 +568,12 @@ pub fn emit_main(entry: Label, codomain: FireflyType, globals: &mut HashMap<Stri
 	}
 }
 
-pub fn generate_format(ty: FireflyType) -> (String, Vec<u32>) {
+pub fn generate_format(ty: FlowType) -> (String, Vec<u32>) {
 	match ty {
-		FireflyType::Unity => ("*".to_owned(), vec![]),
-		FireflyType::Polarity => ("%I64d".to_owned(), vec![0]),
-		FireflyType::Integer => ("%I64d".to_owned(), vec![0]),
-		FireflyType::Product(factors) => {
+		FlowType::Unity => ("*".to_owned(), vec![]),
+		FlowType::Polarity => ("%I64d".to_owned(), vec![0]),
+		FlowType::Integer => ("%I64d".to_owned(), vec![0]),
+		FlowType::Product(factors) => {
 			let factors = factors.into_vec();
 			let mut string = "(".to_owned();
 			let mut offsets = vec![];
@@ -597,8 +596,8 @@ pub fn generate_format(ty: FireflyType) -> (String, Vec<u32>) {
 			string.push(')');
 			(string, offsets)
 		},
-		FireflyType::Procedure => ("<proc 0x%I64x>".to_owned(), vec![0]),
-		FireflyType::Snapshot(_) => ("<snap>".to_owned(), vec![]),
+		FlowType::Procedure => ("<proc 0x%I64x>".to_owned(), vec![0]),
+		FlowType::Snapshot(_) => ("<snap>".to_owned(), vec![]),
 	}
 }
 
@@ -639,8 +638,8 @@ pub fn emit_drop_snapshot() -> NASMProcedure {
 pub fn emit_destructor(
 	symbol_generator: &mut LabelGenerator,
 	procedures: &mut Vec<NASMProcedure>,
-	destructors: &mut HashMap<Slice<FireflyType>, String>,
-	requisites: Slice<FireflyType>,
+	destructors: &mut HashMap<Slice<FlowType>, String>,
+	requisites: Slice<FlowType>,
 ) {
 	use NASMInstruction::*;
 	use NASMRegister64::*;
@@ -682,21 +681,21 @@ pub fn emit_destructor(
 fn emit_destructor_drop(
 	symbol_generator: &mut LabelGenerator,
 	mut offset: u32,
-	ty: FireflyType,
+	ty: FlowType,
 	instructions: &mut Vec<NASMInstruction>,
 ) {
 	use NASMInstruction::*;
 	use NASMRegister64::*;
 
 	match ty {
-		FireflyType::Product(factors) => {
+		FlowType::Product(factors) => {
 			for factor in factors.into_vec().into_iter() {
 				let size = size_of_ty(&factor);
 				emit_destructor_drop(symbol_generator, offset, factor, instructions);
 				offset += size;
 			}
 		},
-		FireflyType::Snapshot(_) => instructions.extend([
+		FlowType::Snapshot(_) => instructions.extend([
 			MovFromAddress(RCX, (RBP, -8)),
 			AddFromU32(RCX, offset),
 			CallLabel("drop_rc".to_owned()),
@@ -707,9 +706,9 @@ fn emit_destructor_drop(
 
 pub fn emit_procedure(
 	symbol_generator: &mut LabelGenerator,
-	destructors: &HashMap<Slice<FireflyType>, String>,
+	destructors: &HashMap<Slice<FlowType>, String>,
 	label: Label,
-	procedure: &FireflyProcedure,
+	procedure: &FlowProcedure,
 ) -> Option<NASMProcedure> {
 	use NASMInstruction::*;
 	use NASMRegister64::*;
@@ -733,7 +732,7 @@ pub fn emit_procedure(
 		} else {
 			Some(stack_frame.allocate(
 				capture_parameter.clone(),
-				FireflyType::Snapshot(Some(capture_requisites.clone())),
+				FlowType::Snapshot(Some(capture_requisites.clone())),
 				true,
 			))
 		}
@@ -744,7 +743,7 @@ pub fn emit_procedure(
 	let codomain_size = size_of_ty(&procedure.codomain);
 	let [mailbox] = symbol_generator.fresh();
 	let mailbox_offset = if codomain_size > 8 {
-		Some(stack_frame.allocate(mailbox.clone(), FireflyType::Integer, true)) // FIXME: This is not technically an integer, but a raw pointer.
+		Some(stack_frame.allocate(mailbox.clone(), FlowType::Integer, true)) // FIXME: This is not technically an integer, but a raw pointer.
 	} else {
 		None
 	};
@@ -804,11 +803,11 @@ pub fn emit_procedure(
 }
 
 pub fn emit_term(
-	destructors: &HashMap<Slice<FireflyType>, String>,
+	destructors: &HashMap<Slice<FlowType>, String>,
 	block_stack: &mut Vec<NASMBlock>,
 	stack_frame: &mut StackFrame,
 	mailbox_offset: Option<i32>,
-	term: &FireflyTerm,
+	term: &FlowTerm,
 	symbol_generator: &mut LabelGenerator,
 ) -> Option<Vec<NASMInstruction>> {
 	let mut instructions = Vec::new();
@@ -845,10 +844,10 @@ pub fn emit_destroy_label(label: Label) -> String {
 }
 
 pub fn emit_statement(
-	destructors: &HashMap<Slice<FireflyType>, String>,
+	destructors: &HashMap<Slice<FlowType>, String>,
 	block_stack: &mut Vec<NASMBlock>,
 	mailbox_offset: Option<i32>,
-	statement: &FireflyStatement,
+	statement: &FlowStatement,
 	instructions: &mut Vec<NASMInstruction>,
 	stack_frame: &mut StackFrame,
 	symbol_generator: &mut LabelGenerator,
@@ -857,13 +856,13 @@ pub fn emit_statement(
 	use NASMRegister64::*;
 	use NASMRegister8::*;
 	match statement {
-		FireflyStatement::Assign { binding, operation } => match operation {
-			FireflyOperation::Id(ty, operand) => {
+		FlowStatement::Assign { binding, operation } => match operation {
+			FlowOperation::Id(ty, operand) => {
 				stack_frame.emit_clones(symbol_generator, operand, instructions);
 
 				let var = stack_frame.allocate(binding.clone(), ty.clone(), true);
 				match operand {
-					FireflyOperand::Copy(projection) => {
+					FlowOperand::Copy(projection) => {
 						let size = size_of_ty(&ty);
 						if size == 0 {
 							()
@@ -875,41 +874,41 @@ pub fn emit_statement(
 							instructions.extend([
 								MovFromReg(RDI, RBP),
 								AddFromI32(RDI, var),
-								MovFromU64(RCX, u64::from(size)),
-								RepMovsb,
+								MovFromU64(RCX, u64::from(size) / 8),
+								RepMovsq,
 							]);
 						}
 					},
-					FireflyOperand::Constant(primitive) => match primitive {
-						FireflyPrimitive::Unity => (),
-						FireflyPrimitive::Polarity(pol) => {
+					FlowOperand::Constant(primitive) => match primitive {
+						FlowPrimitive::Unity => (),
+						FlowPrimitive::Polarity(pol) => {
 							instructions.push(MovFromI64(RAX, *pol as i64));
 							instructions.push(MovIntoAddressFromReg((RBP, var), RAX));
 						},
-						FireflyPrimitive::Integer(int) => {
+						FlowPrimitive::Integer(int) => {
 							instructions.push(MovFromI64(RAX, *int));
 							instructions.push(MovIntoAddressFromReg((RBP, var), RAX));
 						},
-						FireflyPrimitive::Procedure(label) => {
+						FlowPrimitive::Procedure(label) => {
 							instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())));
 							instructions.push(MovIntoAddressFromReg((RBP, var), RAX));
 						},
 					},
 				}
 			},
-			FireflyOperation::Binary(BinaryOperator::Add, [left, right]) => {
-				let var = stack_frame.allocate(binding.clone(), FireflyType::Integer, true);
+			FlowOperation::Binary(BinaryOperator::Add, [left, right]) => {
+				let var = stack_frame.allocate(binding.clone(), FlowType::Integer, true);
 				instructions.push(MovFromU64(RAX, 0));
 
-				fn push_addition(instructions: &mut Vec<NASMInstruction>, operand: &FireflyOperand, stack_frame: &StackFrame) {
+				fn push_addition(instructions: &mut Vec<NASMInstruction>, operand: &FlowOperand, stack_frame: &StackFrame) {
 					match operand {
-						FireflyOperand::Copy(projection) => {
+						FlowOperand::Copy(projection) => {
 							// TODO: this is inefficient, as it doesn't need to use R10 unless some dereference takes place along the way. Even so, it can still leave off the last mov, adding directly using register + offset.
 							// NOTE: One way to fix this might be to return a (destination, source, offset) pair. Then, we can use three separate functions for either emitting a by-value mov, a by-value add, or a by-reference mov.
 							stack_frame.emit_load::<true>(R10, projection, instructions);
 							instructions.push(AddFromReg(RAX, R10));
 						},
-						FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
+						FlowOperand::Constant(FlowPrimitive::Integer(n)) => {
 							instructions.push(MovFromI64(R10, *n));
 							instructions.push(AddFromReg(RAX, R10));
 						},
@@ -921,8 +920,8 @@ pub fn emit_statement(
 				push_addition(instructions, right, stack_frame);
 				instructions.push(MovIntoAddressFromReg((RBP, var), RAX));
 			},
-			FireflyOperation::Binary(BinaryOperator::EqualsQuery(ty), [left, right]) => {
-				let var = stack_frame.allocate(binding.clone(), FireflyType::Polarity, true);
+			FlowOperation::Binary(BinaryOperator::EqualsQuery(ty), [left, right]) => {
+				let var = stack_frame.allocate(binding.clone(), FlowType::Polarity, true);
 				let size = size_of_ty(ty);
 				if size == 0 {
 					instructions.extend([MovFromI64(RAX, 1), MovIntoAddressFromReg((RBP, var), RAX)])
@@ -930,24 +929,24 @@ pub fn emit_statement(
 					fn push_load(
 						instructions: &mut Vec<NASMInstruction>,
 						register: NASMRegister64,
-						operand: &FireflyOperand,
+						operand: &FlowOperand,
 						stack_frame: &StackFrame,
 					) {
 						match operand {
-							FireflyOperand::Copy(projection) => {
+							FlowOperand::Copy(projection) => {
 								// NOTE: We currently do not support equality queries for oversized values, so this works fine for now.
 								stack_frame.emit_load::<true>(register, projection, instructions);
 							},
-							FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
+							FlowOperand::Constant(FlowPrimitive::Integer(n)) => {
 								instructions.push(MovFromI64(register, *n));
 							},
-							FireflyOperand::Constant(FireflyPrimitive::Polarity(b)) => {
+							FlowOperand::Constant(FlowPrimitive::Polarity(b)) => {
 								instructions.push(MovFromI64(register, *b as i64));
 							},
-							FireflyOperand::Constant(FireflyPrimitive::Unity) => {
+							FlowOperand::Constant(FlowPrimitive::Unity) => {
 								panic!("Invalid operand encountered.");
 							},
-							FireflyOperand::Constant(FireflyPrimitive::Procedure(label)) => {
+							FlowOperand::Constant(FlowPrimitive::Procedure(label)) => {
 								instructions.push(MovFromLabel(register, emit_procedure_label(label.clone())));
 							},
 						}
@@ -967,14 +966,14 @@ pub fn emit_statement(
 					unimplemented!();
 				}
 			},
-			FireflyOperation::Pair(fields) => {
+			FlowOperation::Pair(fields) => {
 				for (_, operand) in fields.iter() {
 					stack_frame.emit_clones(symbol_generator, operand, instructions);
 				}
 
 				let var = stack_frame.allocate(
 					binding.clone(),
-					FireflyType::Product(fields.iter().map(|(ty, _)| ty.clone()).collect::<Vec<_>>().into_boxed_slice()),
+					FlowType::Product(fields.iter().map(|(ty, _)| ty.clone()).collect::<Vec<_>>().into_boxed_slice()),
 					true,
 				);
 
@@ -982,7 +981,7 @@ pub fn emit_statement(
 				for (ty, operand) in fields.iter() {
 					let size = size_of_ty(&ty);
 					match operand {
-						FireflyOperand::Copy(projection) => {
+						FlowOperand::Copy(projection) => {
 							if size == 0 {
 								()
 							} else if size == 8 {
@@ -993,22 +992,22 @@ pub fn emit_statement(
 								instructions.extend([
 									MovFromReg(RDI, RBP),
 									AddFromI32(RDI, var + pigeonhole),
-									MovFromU64(RCX, u64::from(size)),
-									RepMovsb,
+									MovFromU64(RCX, u64::from(size) / 8),
+									RepMovsq,
 								]);
 							}
 						},
-						FireflyOperand::Constant(primitive) => match primitive {
-							FireflyPrimitive::Unity => (),
-							FireflyPrimitive::Polarity(pol) => {
+						FlowOperand::Constant(primitive) => match primitive {
+							FlowPrimitive::Unity => (),
+							FlowPrimitive::Polarity(pol) => {
 								instructions.push(MovFromI64(RAX, *pol as i64));
 								instructions.push(MovIntoAddressFromReg((RBP, var + pigeonhole), RAX));
 							},
-							FireflyPrimitive::Integer(int) => {
+							FlowPrimitive::Integer(int) => {
 								instructions.push(MovFromI64(RAX, *int));
 								instructions.push(MovIntoAddressFromReg((RBP, var + pigeonhole), RAX));
 							},
-							FireflyPrimitive::Procedure(label) => {
+							FlowPrimitive::Procedure(label) => {
 								instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())));
 								instructions.push(MovIntoAddressFromReg((RBP, var + pigeonhole), RAX));
 							},
@@ -1017,7 +1016,7 @@ pub fn emit_statement(
 					pigeonhole += size as i32;
 				}
 			},
-			FireflyOperation::Closure(procedure, captures) => {
+			FlowOperation::Closure(procedure, captures) => {
 				for (_, operand) in captures.iter() {
 					stack_frame.emit_clones(symbol_generator, operand, instructions);
 				}
@@ -1027,12 +1026,12 @@ pub fn emit_statement(
 				let proc_var = var;
 
 				match procedure {
-					FireflyOperand::Copy(projection) => {
+					FlowOperand::Copy(projection) => {
 						stack_frame.emit_load::<true>(RAX, projection, instructions);
 						instructions.push(MovIntoAddressFromReg((RBP, proc_var), RAX));
 					},
-					FireflyOperand::Constant(primitive) => match primitive {
-						FireflyPrimitive::Procedure(label) => {
+					FlowOperand::Constant(primitive) => match primitive {
+						FlowPrimitive::Procedure(label) => {
 							instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())));
 							instructions.push(MovIntoAddressFromReg((RBP, proc_var), RAX));
 						},
@@ -1048,7 +1047,7 @@ pub fn emit_statement(
 				} else {
 					// The size to allocate is the size of the reference counter (8, a u64) + (8, the destructor procedure) + the size of a tuple consisting of the captures. Alignment is not an issue, as the maximum alignment should be 8.
 					let size = 8
-						+ 8 + size_of_ty(&FireflyType::Product(
+						+ 8 + size_of_ty(&FlowType::Product(
 						captures
 							.iter()
 							.map(|(ty, _)| ty.clone())
@@ -1078,7 +1077,7 @@ pub fn emit_statement(
 					for (capture_ty, capture) in captures.into_iter() {
 						let capture_size = size_of_ty(capture_ty);
 						match capture {
-							FireflyOperand::Copy(projection) => {
+							FlowOperand::Copy(projection) => {
 								if capture_size == 0 {
 									()
 								} else if capture_size == 8 {
@@ -1089,21 +1088,21 @@ pub fn emit_statement(
 									instructions.extend([
 										MovFromReg(RDI, RAX),
 										AddFromI32(RDI, capture_offset),
-										MovFromU64(RCX, u64::from(size)),
-										RepMovsb,
+										MovFromU64(RCX, u64::from(size) / 8),
+										RepMovsq,
 									]);
 								}
 							},
-							FireflyOperand::Constant(FireflyPrimitive::Integer(n)) => {
+							FlowOperand::Constant(FlowPrimitive::Integer(n)) => {
 								instructions.push(MovIntoAddressFromI64((RAX, capture_offset), *n));
 							},
-							FireflyOperand::Constant(FireflyPrimitive::Polarity(b)) => {
+							FlowOperand::Constant(FlowPrimitive::Polarity(b)) => {
 								instructions.push(MovIntoAddressFromI64((RAX, capture_offset), *b as i64));
 							},
-							FireflyOperand::Constant(FireflyPrimitive::Unity) => {
+							FlowOperand::Constant(FlowPrimitive::Unity) => {
 								panic!("Invalid operand encountered.");
 							},
-							FireflyOperand::Constant(FireflyPrimitive::Procedure(label)) => {
+							FlowOperand::Constant(FlowPrimitive::Procedure(label)) => {
 								instructions.push(MovIntoAddressFromLabel(
 									(RAX, capture_offset),
 									emit_procedure_label(label.clone()),
@@ -1116,9 +1115,8 @@ pub fn emit_statement(
 					instructions.push(MovIntoAddressFromReg((RBP, snapshot_var), RAX));
 				}
 			},
-			FireflyOperation::Address(_) => unimplemented!(),
 		},
-		FireflyStatement::DeclareContinuation {
+		FlowStatement::DeclareContinuation {
 			label,
 			parameter,
 			domain,
@@ -1142,7 +1140,7 @@ pub fn emit_statement(
 
 pub fn emit_terminator(
 	mailbox_offset: Option<i32>,
-	terminator: &FireflyTerminator,
+	terminator: &FlowTerminator,
 	instructions: &mut Vec<NASMInstruction>,
 	stack_frame: &mut StackFrame,
 	symbol_generator: &mut LabelGenerator,
@@ -1150,19 +1148,19 @@ pub fn emit_terminator(
 	use NASMInstruction::*;
 	use NASMRegister64::*;
 	match terminator {
-		FireflyTerminator::Branch {
+		FlowTerminator::Branch {
 			scrutinee,
 			yes_continuation,
 			no_continuation,
 		} => {
 			match scrutinee {
-				FireflyOperand::Copy(projection) => {
+				FlowOperand::Copy(projection) => {
 					stack_frame.emit_load::<true>(RAX, projection, instructions);
 				},
-				FireflyOperand::Constant(FireflyPrimitive::Polarity(b)) => {
+				FlowOperand::Constant(FlowPrimitive::Polarity(b)) => {
 					instructions.push(MovFromI64(RAX, *b as i64));
 				},
-				FireflyOperand::Constant(_) => {
+				FlowOperand::Constant(_) => {
 					panic!("Invalid operand encountered.");
 				},
 			}
@@ -1172,7 +1170,7 @@ pub fn emit_terminator(
 				Jmp(emit_block_local_label(no_continuation.clone())),
 			]);
 		},
-		FireflyTerminator::Apply {
+		FlowTerminator::Apply {
 			procedure,
 			domain,
 			codomain,
@@ -1193,10 +1191,7 @@ pub fn emit_terminator(
 			let phi_buffer = if let Some((_, (_, _))) = continuation_and_parameter {
 				let [phi_buffer_label] = symbol_generator.fresh();
 				let phi_buffer_offset = stack_frame.allocate(phi_buffer_label, codomain.clone(), false);
-				Some((
-					FireflyProjection::new(CypressVariable::Local(phi_buffer_label)),
-					phi_buffer_offset,
-				))
+				Some((FlowProjection::new(FlowVariable::Local(phi_buffer_label)), phi_buffer_offset))
 			} else {
 				None
 			};
@@ -1205,7 +1200,7 @@ pub fn emit_terminator(
 			stack_frame.emit_clones(symbol_generator, snapshot, instructions);
 
 			match argument {
-				FireflyOperand::Copy(projection) => {
+				FlowOperand::Copy(projection) => {
 					let size = size_of_ty(domain);
 					if size == 0 {
 						()
@@ -1215,20 +1210,20 @@ pub fn emit_terminator(
 						stack_frame.emit_load::<false>(RCX, projection, instructions);
 					}
 				},
-				FireflyOperand::Constant(primitive) => match primitive {
-					FireflyPrimitive::Unity => (),
-					FireflyPrimitive::Polarity(p) => instructions.push(MovFromI64(RCX, *p as i64)),
-					FireflyPrimitive::Integer(n) => instructions.push(MovFromI64(RCX, *n)),
-					FireflyPrimitive::Procedure(label) => {
+				FlowOperand::Constant(primitive) => match primitive {
+					FlowPrimitive::Unity => (),
+					FlowPrimitive::Polarity(p) => instructions.push(MovFromI64(RCX, *p as i64)),
+					FlowPrimitive::Integer(n) => instructions.push(MovFromI64(RCX, *n)),
+					FlowPrimitive::Procedure(label) => {
 						instructions.push(MovFromLabel(RCX, emit_procedure_label(label.clone())))
 					},
 				},
 			}
 			match snapshot {
-				FireflyOperand::Copy(projection) => {
+				FlowOperand::Copy(projection) => {
 					stack_frame.emit_load::<true>(RDX, projection, instructions);
 				},
-				FireflyOperand::Constant(primitive) => match primitive {
+				FlowOperand::Constant(primitive) => match primitive {
 					_ => panic!("bad snapshot primitive"),
 				},
 			}
@@ -1244,12 +1239,12 @@ pub fn emit_terminator(
 			}
 
 			let procedure_label = match procedure {
-				FireflyOperand::Copy(projection) => {
+				FlowOperand::Copy(projection) => {
 					stack_frame.emit_load::<true>(RAX, projection, instructions);
 					None
 				},
-				FireflyOperand::Constant(primitive) => match primitive {
-					FireflyPrimitive::Procedure(label) => Some(label.clone()),
+				FlowOperand::Constant(primitive) => match primitive {
+					FlowPrimitive::Procedure(label) => Some(label.clone()),
 					_ => panic!("bad procedure primitive"),
 				},
 			};
@@ -1282,8 +1277,8 @@ pub fn emit_terminator(
 						instructions.extend([
 							MovFromReg(RDI, RBP),
 							AddFromI32(RDI, continuation_parameter_offset),
-							MovFromU64(RCX, u64::from(codomain_size)),
-							RepMovsb,
+							MovFromU64(RCX, u64::from(codomain_size) / 8),
+							RepMovsq,
 						]);
 					}
 				} else {
@@ -1309,7 +1304,7 @@ pub fn emit_terminator(
 				instructions.extend([Leave, Ret])
 			}
 		},
-		FireflyTerminator::Jump {
+		FlowTerminator::Jump {
 			continuation_label,
 			domain,
 			argument,
@@ -1324,18 +1319,15 @@ pub fn emit_terminator(
 			};
 
 			let phi_buffer = if let Some((continuation_label, (_, _))) = continuation_and_parameter {
-				if let FireflyOperand::Copy(projection) = argument {
-					if let CypressVariable::Local(root) = projection.root {
+				if let FlowOperand::Copy(projection) = argument {
+					if let FlowVariable::Local(root) = projection.root {
 						if stack_frame.current_visibles.contains(&root)
 							&& stack_frame.continuation_to_visibles[continuation_label].contains(&root)
 							&& projection.is_indirect()
 						{
 							let [phi_buffer_label] = symbol_generator.fresh();
 							let phi_buffer_offset = stack_frame.allocate(phi_buffer_label, domain.clone(), false);
-							Some((
-								FireflyProjection::new(CypressVariable::Local(phi_buffer_label)),
-								phi_buffer_offset,
-							))
+							Some((FlowProjection::new(FlowVariable::Local(phi_buffer_label)), phi_buffer_offset))
 						} else {
 							None
 						}
@@ -1352,7 +1344,7 @@ pub fn emit_terminator(
 			stack_frame.emit_clones(symbol_generator, argument, instructions);
 
 			match argument {
-				FireflyOperand::Copy(projection) => {
+				FlowOperand::Copy(projection) => {
 					let size = size_of_ty(&domain);
 
 					if let Some((continuation_label, (_, parameter))) = continuation_and_parameter {
@@ -1367,8 +1359,8 @@ pub fn emit_terminator(
 								instructions.extend([
 									MovFromReg(RDI, RBP),
 									AddFromI32(RDI, phi_buffer_offset),
-									MovFromU64(RCX, u64::from(size)),
-									RepMovsb,
+									MovFromU64(RCX, u64::from(size) / 8),
+									RepMovsq,
 								]);
 							}
 						}
@@ -1391,8 +1383,8 @@ pub fn emit_terminator(
 							instructions.extend([
 								MovFromReg(RDI, RBP),
 								AddFromI32(RDI, parameter),
-								MovFromU64(RCX, u64::from(size)),
-								RepMovsb,
+								MovFromU64(RCX, u64::from(size) / 8),
+								RepMovsq,
 							]);
 						}
 
@@ -1408,8 +1400,8 @@ pub fn emit_terminator(
 							stack_frame.emit_load::<false>(RSI, projection, instructions);
 							instructions.extend([
 								MovFromAddress(RDI, (RBP, mailbox_offset)),
-								MovFromU64(RCX, u64::from(size)),
-								RepMovsb,
+								MovFromU64(RCX, u64::from(size) / 8),
+								RepMovsq,
 							]);
 						} else {
 							panic!("oversized value (or between-sized) but no mailbox to return to")
@@ -1425,16 +1417,16 @@ pub fn emit_terminator(
 						instructions.push(Ret);
 					}
 				},
-				FireflyOperand::Constant(primitive) => {
+				FlowOperand::Constant(primitive) => {
 					match primitive {
-						FireflyPrimitive::Unity => (),
-						FireflyPrimitive::Polarity(p) => {
+						FlowPrimitive::Unity => (),
+						FlowPrimitive::Polarity(p) => {
 							instructions.push(MovFromI64(RAX, *p as i64));
 						},
-						FireflyPrimitive::Integer(n) => {
+						FlowPrimitive::Integer(n) => {
 							instructions.push(MovFromI64(RAX, *n));
 						},
-						FireflyPrimitive::Procedure(label) => {
+						FlowPrimitive::Procedure(label) => {
 							instructions.push(MovFromLabel(RAX, emit_procedure_label(label.clone())))
 						},
 					}
@@ -1453,14 +1445,14 @@ pub fn emit_terminator(
 }
 
 // For now, every size should be a multiple of 8.
-pub fn size_of_ty(ty: &FireflyType) -> u32 {
+pub fn size_of_ty(ty: &FlowType) -> u32 {
 	match ty {
-		FireflyType::Unity => 0,
-		FireflyType::Polarity => 8,
-		FireflyType::Integer => 8,
-		FireflyType::Product(factors) => factors.iter().map(size_of_ty).fold(0, core::ops::Add::add),
-		FireflyType::Procedure => 8,
-		FireflyType::Snapshot(_) => 8,
+		FlowType::Unity => 0,
+		FlowType::Polarity => 8,
+		FlowType::Integer => 8,
+		FlowType::Product(factors) => factors.iter().map(size_of_ty).fold(0, core::ops::Add::add),
+		FlowType::Procedure => 8,
+		FlowType::Snapshot(_) => 8,
 	}
 }
 

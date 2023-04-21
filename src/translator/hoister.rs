@@ -1,502 +1,356 @@
 use std::collections::HashMap;
 
 use super::label::{Label, LabelGenerator};
-use crate::{
-	interpreter::{
-		cypress::{
-			CypressOperation, CypressPrimitive, CypressProjection, CypressProjector, CypressStatement, CypressTerm,
-			CypressTerminator, CypressType, CypressVariable,
-		},
-		firefly::{
-			BinaryOperator, FireflyOperand, FireflyOperation, FireflyPrimitive, FireflyProcedure, FireflyProgram,
-			FireflyProjection, FireflyProjector, FireflyStatement, FireflyTerm, FireflyTerminator, FireflyType,
-		},
-	},
-	utility::{ignore::Ignore, slice::slice},
+use crate::interpreter::{
+	base::{BaseIntrinsic, BaseTerm, BaseType, BaseVariable},
+	june::{JuneIntrinsic, JuneProcedure, JuneProgram, JuneTerm, JuneType},
 };
 
-struct Substitution(HashMap<Label, FireflyProjection>);
+pub fn hoist(term: BaseTerm, mut symbol_generator: LabelGenerator) -> JuneProgram {
+	let mut procedures = HashMap::<Label, JuneProcedure>::new();
 
-trait Substitute {
-	fn apply(&mut self, substitution: &Substitution);
-
-	fn subbing(mut self, substitution: &Substitution) -> Self
-	where
-		Self: Sized,
-	{
-		self.apply(substitution);
-		self
-	}
-}
-
-impl Substitute for FireflyProjection {
-	fn apply(&mut self, substitution: &Substitution) {
-		if let CypressVariable::Local(local) = self.root {
-			if let Some(mut substituend) = substitution.0.get(&local).cloned() {
-				substituend.projectors.append(&mut self.projectors);
-				*self = substituend;
-			}
-		}
-	}
-}
-
-impl Substitute for FireflyOperand {
-	fn apply(&mut self, substitution: &Substitution) {
-		match self {
-			FireflyOperand::Copy(projection) => projection.apply(substitution),
-			FireflyOperand::Constant(_) => (),
-		}
-	}
-}
-
-impl Substitute for FireflyOperation {
-	fn apply(&mut self, substitution: &Substitution) {
-		match self {
-			FireflyOperation::Address(projection) => projection.apply(substitution),
-			FireflyOperation::Id(_, operands) => operands.apply(substitution),
-			FireflyOperation::Binary(_, operands) => operands.iter_mut().map(|x| x.apply(substitution)).collect(),
-			FireflyOperation::Pair(operands) => operands.iter_mut().map(|(_, operand)| operand.apply(substitution)).collect(),
-			FireflyOperation::Closure(procedure, snapshot) => {
-				procedure.apply(substitution);
-				snapshot.iter_mut().map(|(_, x)| x.apply(substitution)).collect()
-			},
-		}
-	}
-}
-
-impl core::ops::Mul<Self> for Substitution {
-	type Output = Self;
-
-	fn mul(mut self, other: Self) -> Self::Output {
-		for substituend in self.0.values_mut() {
-			substituend.apply(&other)
-		}
-
-		for (replacee, substituend) in other.0 {
-			self.0.entry(replacee).or_insert(substituend);
-		}
-
-		self
-	}
-}
-
-impl Substitute for FireflyTerm {
-	fn apply(&mut self, substitution: &Substitution) {
-		for statement in &mut self.statements {
-			match statement {
-				FireflyStatement::Assign { binding: _, operation } => operation.apply(substitution),
-				// Because every parameter is fresh, we are not concerned about shadowing.
-				FireflyStatement::DeclareContinuation {
-					label: _,
-					parameter: _,
-					domain: _,
-					body,
-				} => body.apply(substitution),
-			}
-		}
-
-		match &mut self.terminator {
-			FireflyTerminator::Branch {
-				scrutinee,
-				yes_continuation: _,
-				no_continuation: _,
-			} => scrutinee.apply(substitution),
-			FireflyTerminator::Apply {
-				procedure,
-				domain: _,
-				codomain: _,
-				snapshot,
-				continuation_label: _,
-				argument,
-			} => [procedure, snapshot, argument].map(|x| x.apply(substitution)).ignore(),
-			FireflyTerminator::Jump {
-				continuation_label: _,
-				domain: _,
-				argument,
-			} => argument.apply(substitution),
-		}
-	}
-}
-
-fn get_if_local(projection: &CypressProjection) -> Option<Label> {
-	if let CypressVariable::Local(label) = projection.root {
-		Some(label.clone())
-	} else {
-		None
-	}
-}
-
-pub fn compute_free_variables_in_operation(operation: &CypressOperation) -> HashMap<Label, CypressType> {
-	match operation {
-		CypressOperation::Id(ty, x) => [x].into_iter().filter_map(get_if_local).map(|x| (x, ty.clone())).collect(),
-		CypressOperation::EqualsQuery(ty, x) => x.into_iter().filter_map(get_if_local).map(|x| (x, ty.clone())).collect(),
-		CypressOperation::Add(x) => x
-			.into_iter()
-			.filter_map(get_if_local)
-			.map(|x| (x, CypressType::Integer))
-			.collect(),
-		CypressOperation::Pair(vs) => (*vs)
-			.into_iter()
-			.filter_map(|(ty, x)| get_if_local(x).map(|x| (x, ty.clone())))
-			.collect(),
-	}
-}
-
-pub fn compute_free_variables_in_term(term: &CypressTerm) -> HashMap<Label, CypressType> {
-	let mut free_variables: HashMap<Label, CypressType> = match &term.terminator {
-		CypressTerminator::Branch {
-			scrutinee,
-			yes_continuation: _,
-			no_continuation: _,
-		} => [scrutinee]
-			.into_iter()
-			.filter_map(get_if_local)
-			.map(|x| (x, CypressType::Polarity))
-			.collect(),
-		CypressTerminator::Apply {
-			function,
-			domain,
-			codomain,
-			continuation: _,
-			argument,
-		} => [
-			(
-				function,
-				CypressType::Power {
-					domain: Box::new(domain.clone()),
-					codomain: Box::new(codomain.clone()),
-				},
-			),
-			(argument, domain.clone()),
-		]
-		.into_iter()
-		.filter_map(|(x, ty)| get_if_local(x).map(|x| (x, ty)))
-		.collect(),
-		CypressTerminator::Jump {
-			continuation_label: _,
-			argument,
-			domain,
-		} => [argument]
-			.into_iter()
-			.filter_map(get_if_local)
-			.map(|x| (x, domain.clone()))
-			.collect(),
-	};
-
-	for statement in term.statements.iter().rev() {
-		match statement {
-			CypressStatement::AssignValue {
-				binding,
-				ty: _,
-				value: _,
-			} => {
-				free_variables.remove(&binding);
-			},
-			CypressStatement::AssignOperation { binding, operation } => {
-				free_variables.remove(&binding);
-				free_variables.extend(compute_free_variables_in_operation(operation));
-			},
-			CypressStatement::DeclareFunction {
-				binding,
-				fixpoint_name,
-				domain: _,
-				codomain: _,
-				parameter,
-				body,
-			} => {
-				let mut body_free_variables = compute_free_variables_in_term(&*body);
-				body_free_variables.remove(&parameter);
-				if let Some(fixpoint_name) = fixpoint_name {
-					body_free_variables.remove(&fixpoint_name);
-				};
-
-				free_variables.remove(&binding);
-				free_variables.extend(body_free_variables);
-			},
-			CypressStatement::DeclareContinuation {
-				label: _,
-				domain: _,
-				parameter,
-				body,
-			} => {
-				let mut body_free_variables = compute_free_variables_in_term(&*body);
-				body_free_variables.remove(&parameter);
-
-				free_variables.extend(body_free_variables);
-			},
-		}
-	}
-
-	free_variables
-}
-
-pub fn hoist_projection(projection: CypressProjection) -> FireflyProjection {
-	FireflyProjection {
-		root: projection.root,
-		projectors: projection
-			.projectors
-			.into_iter()
-			.map(|x| match x {
-				CypressProjector::Field(x) => FireflyProjector::Field(x),
-			})
-			.collect(),
-	}
-}
-
-pub fn hoist_primitive(value: CypressPrimitive) -> FireflyPrimitive {
-	match value {
-		CypressPrimitive::Unity => FireflyPrimitive::Unity,
-		CypressPrimitive::Polarity(x) => FireflyPrimitive::Polarity(x),
-		CypressPrimitive::Integer(x) => FireflyPrimitive::Integer(x),
-	}
-}
-
-pub fn hoist_operation(operation: CypressOperation) -> FireflyOperation {
-	match operation {
-		CypressOperation::Id(ty, x) => FireflyOperation::Id(hoist_ty(ty), FireflyOperand::Copy(hoist_projection(x))),
-		CypressOperation::EqualsQuery(ty, x) => FireflyOperation::Binary(
-			BinaryOperator::EqualsQuery(hoist_ty(ty)),
-			x.map(|x| FireflyOperand::Copy(hoist_projection(x))),
-		),
-		CypressOperation::Add(x) => {
-			FireflyOperation::Binary(BinaryOperator::Add, x.map(|x| FireflyOperand::Copy(hoist_projection(x))))
-		},
-		CypressOperation::Pair(x) => FireflyOperation::Pair(
-			x.into_vec()
-				.into_iter()
-				.map(|(ty, projection)| (hoist_ty(ty), FireflyOperand::Copy(hoist_projection(projection))))
-				.collect::<Vec<_>>()
-				.into_boxed_slice(),
-		),
-	}
-}
-
-pub fn hoist_ty(ty: CypressType) -> FireflyType {
-	match ty {
-		CypressType::Unity => FireflyType::Unity,
-		CypressType::Polarity => FireflyType::Polarity,
-		CypressType::Integer => FireflyType::Integer,
-		CypressType::Power { domain: _, codomain: _ } => {
-			FireflyType::Product(slice![FireflyType::Procedure, FireflyType::Snapshot(None),])
-		},
-		CypressType::Product(factors) => FireflyType::Product(
-			factors
-				.into_vec()
-				.into_iter()
-				.map(hoist_ty)
-				.collect::<Vec<_>>()
-				.into_boxed_slice(),
-		),
-	}
-}
-
-pub fn hoist_term(
-	term: CypressTerm,
-	procedures: &mut HashMap<Label, FireflyProcedure>,
-	symbol_generator: &mut LabelGenerator,
-) -> FireflyTerm {
-	let mut statements: Vec<FireflyStatement> = Vec::new();
-
-	for statement in term.statements {
-		match statement {
-			CypressStatement::AssignValue { binding, ty, value } => {
-				statements.push(FireflyStatement::Assign {
-					binding,
-					operation: FireflyOperation::Id(hoist_ty(ty), FireflyOperand::Constant(hoist_primitive(value))),
-				});
-			},
-			CypressStatement::AssignOperation { binding, operation } => {
-				statements.push(FireflyStatement::Assign {
-					binding,
-					operation: hoist_operation(operation),
-				});
-			},
-			CypressStatement::DeclareFunction {
-				binding,
-				fixpoint_name,
-				domain,
-				codomain,
-				parameter,
-				body,
-			} => {
-				let [procedure_label, environment] = symbol_generator.fresh();
-
-				let free_variables = {
-					let mut free_variables = compute_free_variables_in_term(&body);
-					free_variables.remove(&parameter);
-					if let Some(fixpoint_name) = fixpoint_name {
-						free_variables.remove(&fixpoint_name);
-					}
-					free_variables.into_iter().collect::<Vec<_>>()
-				};
-
-				// Generate a procedure.
-				{
-					let substitution = Substitution({
-						let mut mapping = free_variables
-							.iter()
-							.cloned()
-							.enumerate()
-							.map(|(i, (variable, _))| {
-								(
-									variable,
-									FireflyProjection::new(CypressVariable::Local(environment))
-										.project(FireflyProjector::Free(i)),
-								)
-							})
-							.collect::<HashMap<_, _>>();
-						mapping.insert(
-							parameter,
-							FireflyProjection::new(CypressVariable::Local(parameter)).project(FireflyProjector::Parameter),
-						);
-						mapping
-					});
-
-					let mut body = hoist_term(*body, procedures, symbol_generator).subbing(&substitution);
-
-					if let Some(fixpoint_name) = fixpoint_name {
-						body.statements.insert(
-							0,
-							FireflyStatement::Assign {
-								binding: fixpoint_name,
-								operation: FireflyOperation::Closure(
-									FireflyOperand::Constant(FireflyPrimitive::Procedure(procedure_label)),
-									free_variables
-										.iter()
-										.enumerate()
-										.map(|(i, (_, ty))| {
-											(
-												hoist_ty(ty.clone()),
-												FireflyOperand::Copy(
-													FireflyProjection::new(CypressVariable::Local(environment))
-														.project(FireflyProjector::Free(i)),
-												),
-											)
-										})
-										.collect::<Vec<_>>()
-										.into_boxed_slice(),
-								),
-							},
-						);
-					}
-
-					procedures.insert(
-						procedure_label,
-						FireflyProcedure {
-							capture: Some((
-								environment,
-								free_variables.iter().map(|(_, ty)| hoist_ty(ty.clone())).collect(),
-							)),
-							parameter: Some(parameter),
-							domain: hoist_ty(domain),
-							codomain: hoist_ty(codomain),
-							body,
-						},
-					);
-				}
-
-				// Generate and return a closure assignment.
-				{
-					let captures = free_variables
-						.into_iter()
-						.map(|(variable, ty)| {
-							(
-								hoist_ty(ty),
-								FireflyOperand::Copy(FireflyProjection::new(CypressVariable::Local(variable))),
-							)
-						})
-						.collect::<Vec<_>>()
-						.into_boxed_slice();
-
-					statements.push(FireflyStatement::Assign {
-						binding,
-						operation: FireflyOperation::Closure(
-							FireflyOperand::Constant(FireflyPrimitive::Procedure(procedure_label)),
-							captures,
-						),
-					});
-				}
-			},
-			CypressStatement::DeclareContinuation {
-				label,
-				domain,
-				parameter,
-				body,
-			} => {
-				statements.push(FireflyStatement::DeclareContinuation {
-					label,
-					parameter,
-					domain: hoist_ty(domain),
-					body: hoist_term(*body, procedures, symbol_generator),
-				});
-			},
-		}
-	}
-
-	let terminator = match term.terminator {
-		CypressTerminator::Branch {
-			scrutinee,
-			yes_continuation,
-			no_continuation,
-		} => FireflyTerminator::Branch {
-			scrutinee: FireflyOperand::Copy(hoist_projection(scrutinee)),
-			yes_continuation: yes_continuation,
-			no_continuation: no_continuation,
-		},
-		CypressTerminator::Apply {
-			function,
-			domain,
-			codomain,
-			continuation,
-			argument,
-		} => {
-			let function_projection = hoist_projection(function);
-			FireflyTerminator::Apply {
-				procedure: FireflyOperand::Copy(function_projection.clone().project(FireflyProjector::Field(0))),
-				domain: hoist_ty(domain),
-				codomain: hoist_ty(codomain),
-				snapshot: FireflyOperand::Copy(function_projection.project(FireflyProjector::Field(1))),
-				continuation_label: continuation,
-				argument: FireflyOperand::Copy(hoist_projection(argument)),
-			}
-		},
-		CypressTerminator::Jump {
-			domain,
-			continuation_label,
-			argument,
-		} => FireflyTerminator::Jump {
-			continuation_label,
-			domain: hoist_ty(domain),
-			argument: FireflyOperand::Copy(hoist_projection(argument)),
-		},
-	};
-
-	FireflyTerm { statements, terminator }
-}
-
-// Closure conversion turns functions, which may have free variables, into closures, which bundle a procedure label and an environment.
-// All nested function declarations are hoisted to the top level of the program as first-order procedures.
-pub fn hoist_program(term: CypressTerm, ty: CypressType, symbol_generator: &mut LabelGenerator) -> FireflyProgram {
-	let mut procedures = HashMap::<Label, FireflyProcedure>::new();
-
-	//let codomain = hoist_ty(term.ty)
-	let entry_body = hoist_term(term, &mut procedures, symbol_generator);
-
+	let entry_term = hoist_term(term, &mut procedures, &mut symbol_generator);
 	let [entry] = symbol_generator.fresh();
 	procedures.insert(
 		entry,
-		FireflyProcedure {
-			capture: None,
+		JuneProcedure {
+			domain: JuneType::Unity,
 			parameter: None,
-			domain: FireflyType::Unity,
-			codomain: hoist_ty(ty),
-			body: entry_body,
+			capture: None,
+			body: entry_term,
 		},
 	);
 
-	FireflyProgram {
+	JuneProgram {
 		procedures,
 		entry,
-		symbol_generator: symbol_generator.clone(),
+		symbol_generator,
+	}
+}
+
+fn hoist_term(
+	term: BaseTerm,
+	procedures: &mut HashMap<Label, JuneProcedure>,
+	symbol_generator: &mut LabelGenerator,
+) -> JuneTerm {
+	match term {
+		BaseTerm::Polarity(x) => JuneTerm::Polarity(x),
+		BaseTerm::Integer(x) => JuneTerm::Integer(x),
+		BaseTerm::Name(ty, name) => JuneTerm::Name(hoist_ty(ty), name),
+		BaseTerm::Tuple(typed_fields) => JuneTerm::Tuple(
+			typed_fields
+				.into_iter()
+				.map(|(factor, field)| (hoist_ty(factor), hoist_term(field, procedures, symbol_generator)))
+				.collect(),
+		),
+		BaseTerm::Projection { ty, tuple, index } => JuneTerm::Projection {
+			ty: hoist_ty(ty),
+			tuple: Box::new(hoist_term(*tuple, procedures, symbol_generator)),
+			index,
+		},
+		BaseTerm::Function {
+			domain,
+			codomain,
+			fixpoint_name,
+			parameter,
+			body,
+		} => {
+			let domain = hoist_ty(domain);
+			let codomain = hoist_ty(codomain);
+			let [procedure_label] = symbol_generator.fresh();
+
+			// Compute the free variables of the function.
+			let function_upvars = {
+				let mut function_upvars = compute_upvars(&body);
+				function_upvars.remove(&parameter);
+				if let Some(fixpoint_name) = &fixpoint_name {
+					function_upvars.remove(fixpoint_name);
+				}
+				function_upvars.into_iter().collect::<Vec<_>>()
+			};
+
+			let upvar_tys = function_upvars.iter().map(|(_, ty)| hoist_ty(ty.clone())).collect::<Vec<_>>();
+
+			// Insert a procedure.
+			{
+				let [snapshot_label] = symbol_generator.fresh();
+
+				let substitution = Substitution(
+					function_upvars
+						.iter()
+						.enumerate()
+						.map(|(i, (variable, ty))| {
+							(
+								variable.clone(),
+								JuneTerm::Free {
+									ty: hoist_ty(ty.clone()),
+									share: Box::new(JuneTerm::Name(
+										JuneType::Share(Some(upvar_tys.clone())),
+										BaseVariable::Auto(snapshot_label),
+									)),
+									index: i,
+								},
+							)
+						})
+						.collect::<HashMap<_, _>>(),
+				);
+
+				let mut body = hoist_term(*body, procedures, symbol_generator);
+
+				substitute(&mut body, &substitution);
+
+				if let Some(fixpoint_name) = fixpoint_name {
+					body = JuneTerm::Assignment {
+						ty: body.ty(),
+						assignee: fixpoint_name,
+						definition: Box::new(JuneTerm::Closure {
+							domain: domain.clone(),
+							codomain: codomain.clone(),
+							procedure: procedure_label,
+							fields: function_upvars
+								.iter()
+								.enumerate()
+								.map(|(i, (_, ty))| JuneTerm::Free {
+									ty: hoist_ty(ty.clone()),
+									share: Box::new(JuneTerm::Name(
+										JuneType::Share(Some(upvar_tys.clone())),
+										BaseVariable::Auto(snapshot_label),
+									)),
+									index: i,
+								})
+								.collect(),
+						}),
+						rest: Box::new(body),
+					}
+				}
+
+				procedures.insert(
+					procedure_label,
+					JuneProcedure {
+						domain: domain.clone(),
+						parameter: Some(parameter),
+						capture: Some((snapshot_label, upvar_tys.clone())),
+						body,
+					},
+				);
+			}
+
+			// Produce a tuple of the procedure and a snapshot of the required upvars.
+			JuneTerm::Closure {
+				domain,
+				codomain,
+				procedure: procedure_label,
+				fields: function_upvars
+					.into_iter()
+					.map(|(var, ty)| JuneTerm::Name(hoist_ty(ty), BaseVariable::Auto(var)))
+					.collect(),
+			}
+		},
+		BaseTerm::Application {
+			codomain,
+			function,
+			argument,
+		} => JuneTerm::Application {
+			codomain: hoist_ty(codomain),
+			function: Box::new(hoist_term(*function, procedures, symbol_generator)),
+			argument: Box::new(hoist_term(*argument, procedures, symbol_generator)),
+		},
+		BaseTerm::IntrinsicInvocation { intrinsic, arguments } => JuneTerm::IntrinsicInvocation {
+			intrinsic: hoist_intrinsic(intrinsic),
+			arguments: arguments
+				.into_iter()
+				.map(|argument| hoist_term(argument, procedures, symbol_generator))
+				.collect(),
+		},
+		BaseTerm::Assignment {
+			ty,
+			assignee,
+			definition,
+			rest,
+		} => JuneTerm::Assignment {
+			ty: hoist_ty(ty),
+			assignee: assignee,
+			definition: Box::new(hoist_term(*definition, procedures, symbol_generator)),
+			rest: Box::new(hoist_term(*rest, procedures, symbol_generator)),
+		},
+		BaseTerm::EqualityQuery { ty, left, right } => JuneTerm::EqualityQuery {
+			ty: hoist_ty(ty),
+			left: Box::new(hoist_term(*left, procedures, symbol_generator)),
+			right: Box::new(hoist_term(*right, procedures, symbol_generator)),
+		},
+		BaseTerm::CaseSplit { ty, scrutinee, cases } => JuneTerm::CaseSplit {
+			ty: hoist_ty(ty),
+			scrutinee: Box::new(hoist_term(*scrutinee, procedures, symbol_generator)),
+			cases: cases
+				.into_iter()
+				.map(|(case, term)| (case, Box::new(hoist_term(*term, procedures, symbol_generator))))
+				.collect(),
+		},
+		BaseTerm::Loop {
+			codomain,
+			loop_name,
+			parameter,
+			argument,
+			body,
+		} => JuneTerm::Loop {
+			codomain: hoist_ty(codomain),
+			loop_name,
+			parameter,
+			argument: Box::new(hoist_term(*argument, procedures, symbol_generator)),
+			body: Box::new(hoist_term(*body, procedures, symbol_generator)),
+		},
+		BaseTerm::Step { loop_name, argument } => JuneTerm::Step {
+			loop_name,
+			argument: Box::new(hoist_term(*argument, procedures, symbol_generator)),
+		},
+		BaseTerm::Emit { loop_name, argument } => JuneTerm::Emit {
+			loop_name,
+			argument: Box::new(hoist_term(*argument, procedures, symbol_generator)),
+		},
+	}
+}
+
+fn hoist_intrinsic(intrinsic: BaseIntrinsic) -> JuneIntrinsic {
+	match intrinsic {
+		BaseIntrinsic::Add => JuneIntrinsic::Add,
+	}
+}
+
+fn hoist_ty(ty: BaseType) -> JuneType {
+	match ty {
+		BaseType::Empty => JuneType::Empty,
+		BaseType::Polarity => JuneType::Polarity,
+		BaseType::Integer => JuneType::Integer,
+		BaseType::Product(factors) => JuneType::Product(factors.into_iter().map(hoist_ty).collect()),
+		BaseType::Power { domain, codomain } => JuneType::Product(vec![
+			JuneType::Procedure {
+				domain: Box::new(hoist_ty(*domain)),
+				codomain: Box::new(hoist_ty(*codomain)),
+			},
+			JuneType::Share(None),
+		]),
+	}
+}
+
+fn compute_upvars(term: &BaseTerm) -> HashMap<Label, BaseType> {
+	use BaseTerm::*;
+	match term {
+		Polarity(_) | Integer(_) => HashMap::new(),
+		Name(ty, name) => match name {
+			BaseVariable::Auto(name) => HashMap::from([(name.clone(), ty.clone())]),
+			BaseVariable::Name(_) => HashMap::new(),
+		},
+		Tuple(fields) => fields.iter().map(|(_, field)| compute_upvars(field)).flatten().collect(),
+		Projection { tuple, .. } => compute_upvars(tuple.as_ref()),
+		Function {
+			fixpoint_name,
+			parameter,
+			body,
+			..
+		} => {
+			let mut body_upvars = compute_upvars(body);
+			body_upvars.remove(parameter);
+			if let Some(fixpoint_name) = fixpoint_name {
+				body_upvars.remove(fixpoint_name);
+			}
+			body_upvars
+		},
+		Application { function, argument, .. } => {
+			[&**function, &**argument].into_iter().map(compute_upvars).flatten().collect()
+		},
+		IntrinsicInvocation { intrinsic: _, arguments } => arguments.iter().map(compute_upvars).flatten().collect(),
+		Assignment {
+			assignee,
+			definition,
+			rest,
+			..
+		} => {
+			let mut rest_upvars = compute_upvars(rest);
+			rest_upvars.remove(assignee);
+			rest_upvars.extend(compute_upvars(definition));
+			rest_upvars
+		},
+		EqualityQuery { ty: _, left, right } => [&**left, &**right].into_iter().map(compute_upvars).flatten().collect(),
+		CaseSplit { scrutinee, cases, .. } => [&**scrutinee]
+			.into_iter()
+			.chain(cases.iter().map(|(_, term)| &**term))
+			.map(compute_upvars)
+			.flatten()
+			.collect(),
+		Loop {
+			parameter,
+			argument,
+			body,
+			..
+		} => {
+			let mut body_upvars = compute_upvars(&*body);
+			body_upvars.remove(parameter);
+			body_upvars.extend(compute_upvars(argument));
+			body_upvars
+		},
+		Step { argument, .. } => compute_upvars(&argument),
+		Emit { argument, .. } => compute_upvars(&argument),
+	}
+}
+
+struct Substitution(HashMap<Label, JuneTerm>);
+
+fn substitute(term: &mut JuneTerm, substitution: &Substitution) {
+	use JuneTerm::*;
+	match term {
+		Polarity(_) | Integer(_) | Procedure { .. } => (),
+		Name(_, variable) => match variable {
+			BaseVariable::Auto(name) => {
+				if let Some(new_term) = substitution.0.get(name) {
+					*term = new_term.clone();
+				} else {
+					()
+				}
+			},
+			BaseVariable::Name(_) => (),
+		},
+		Tuple(fields) => {
+			for (_, field) in fields {
+				substitute(field, substitution)
+			}
+		},
+		Closure { fields, .. } => {
+			for field in fields {
+				substitute(field, substitution)
+			}
+		},
+		Projection { ty: _, tuple, index: _ } => substitute(tuple, substitution),
+		Free { ty: _, share, index: _ } => substitute(share, substitution),
+		Application { function, argument, .. } => {
+			substitute(function, substitution);
+			substitute(argument, substitution);
+		},
+		IntrinsicInvocation { arguments, .. } => {
+			for argument in arguments {
+				substitute(argument, substitution)
+			}
+		},
+		Assignment { definition, rest, .. } => {
+			// NOTE: Because every binding is fresh, shadowing doesn't concern us.
+			substitute(definition, substitution);
+			substitute(rest, substitution);
+		},
+		EqualityQuery { left, right, .. } => {
+			substitute(left, substitution);
+			substitute(right, substitution);
+		},
+		CaseSplit { ty, scrutinee, cases } => {
+			substitute(scrutinee, substitution);
+			for (_, case) in cases {
+				substitute(case, substitution);
+			}
+		},
+		Loop { argument, body, .. } => {
+			// NOTE: Because every binding is fresh, shadowing doesn't concern us.
+			substitute(argument, substitution);
+			substitute(body, substitution);
+		},
+		Step { argument, .. } => substitute(argument, substitution),
+		Emit { argument, .. } => substitute(argument, substitution),
 	}
 }
