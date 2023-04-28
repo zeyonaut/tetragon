@@ -113,7 +113,6 @@ pub enum Node {
 }
 
 // TODO: Allow fallible node production (with early return).
-// TODO: We can't pattern match on owned slices (not even with box_patterns!) and gain ownership of their contents, so this is the best we can do, unfortunately.
 // NOTE: This should follow the structure of the grammar written as written in (*).
 fn produce_node(target: Nonterminal, pattern: Slice<Symbol<Node, Token>>) -> Node {
 	use Symbol::{Nonterminal as Nx, Terminal as Tx};

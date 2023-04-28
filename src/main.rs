@@ -40,7 +40,10 @@ use translator::{hoister::hoist, label::LabelGenerator, sequentializer::sequenti
 use utility::*;
 
 use crate::{
-	interpreter::base::{evaluate_base, interpret_base, BaseEnvironment, BaseValue, BaseVariable},
+	interpreter::{
+		base::{evaluate_base, interpret_base, BaseEnvironment, BaseValue, BaseVariable},
+		flow::pretty_print_program,
+	},
 	translator::{elaborator::elaborate_program, nasm_win64},
 };
 
@@ -67,6 +70,8 @@ fn main() {
 		let program = hoist(term, symbol_generator);
 
 		let program = sequentialize(program);
+
+		println!("{}", pretty_print_program(&program));
 
 		let program = nasm_win64::emit_program(program);
 

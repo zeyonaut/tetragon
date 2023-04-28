@@ -8,7 +8,7 @@ use crate::{
 			BinaryOperator, FlowOperand, FlowOperation, FlowPrimitive, FlowProcedure, FlowProgram, FlowProjection,
 			FlowProjector, FlowStatement, FlowTerm, FlowTerminator, FlowType, FlowVariable,
 		},
-		june::{JuneIntrinsic, JuneProcedure, JuneProgram, JuneTerm, JuneType},
+		june::{JuneIntrinsic, JunePrimitive, JuneProcedure, JuneProgram, JuneTerm, JuneType},
 	},
 	utility::{
 		composite::apply_composed,
@@ -53,7 +53,7 @@ fn sequentialize_procedure(procedure: JuneProcedure, symbol_generator: &mut Labe
 	let substitution = if let Some(parameter) = parameter {
 		Substitution(HashMap::from([(
 			parameter,
-			FlowOperand::Copy(FlowProjection::new(FlowVariable::Local(parameter)).project(FlowProjector::Parameter)),
+			FlowProjection::new(FlowVariable::Local(parameter)).project(FlowProjector::Parameter),
 		)]))
 	} else {
 		Substitution(HashMap::new())
@@ -124,16 +124,8 @@ fn sequentialize_term(
 	use JuneTerm::*;
 	let ty = term.ty();
 	match term {
-		Polarity(x) => (
-			FlowOperand::Constant(FlowPrimitive::Polarity(x)),
-			Box::new(core::convert::identity),
-		),
-		Integer(x) => (
-			FlowOperand::Constant(FlowPrimitive::Integer(x)),
-			Box::new(core::convert::identity),
-		),
-		Procedure { procedure, .. } => (
-			FlowOperand::Constant(FlowPrimitive::Procedure(procedure)),
+		Primitive(primitive) => (
+			FlowOperand::Constant(sequentialize_primitive(primitive)),
 			Box::new(core::convert::identity),
 		),
 		Name(_, x) => (
@@ -279,7 +271,7 @@ fn sequentialize_term(
 			let domain = sequentialize_ty(definition.ty());
 
 			// FIXME: Substituting instead of generating a continuation jump prevents unnecessary reassignment or even assignment, but potentially generates expensive dereferences at each substitution site and, more importantly, delays drops that should happen at the moment of assignment due to scope exit. As such, the previous implementation is preserved here as a comment for reference until these issues are fixed.
-			/*
+
 			let definition = sequentialize_tail_term(*definition, Some(continuation), loop_stack, symbol_generator);
 			let (rest_variable, rest_context) = sequentialize_term(*rest, loop_stack, symbol_generator);
 
@@ -295,8 +287,8 @@ fn sequentialize_term(
 					.prepend_to(definition)
 				}),
 			)
-			*/
 
+			/*
 			let (definition_variable, definition_context) = sequentialize_term(*definition, loop_stack, symbol_generator);
 			let (rest_variable, rest_context) = sequentialize_term(*rest, loop_stack, symbol_generator);
 
@@ -306,6 +298,7 @@ fn sequentialize_term(
 				rest_variable,
 				Box::new(move |body| definition_context(rest_context(body).subbing(&substitution))),
 			)
+			*/
 		},
 		EqualityQuery { ty, left, right } => {
 			let [binding] = symbol_generator.fresh();
@@ -464,22 +457,10 @@ fn sequentialize_tail_term(
 ) -> FlowTerm {
 	use JuneTerm::*;
 	match term {
-		Polarity(x) => FlowTerminator::Jump {
+		Primitive(primitive) => FlowTerminator::Jump {
 			continuation_label,
-			argument: FlowOperand::Constant(FlowPrimitive::Polarity(x)),
+			argument: FlowOperand::Constant(sequentialize_primitive(primitive)),
 			domain: FlowType::Polarity,
-		}
-		.into(),
-		Integer(x) => FlowTerminator::Jump {
-			continuation_label,
-			argument: FlowOperand::Constant(FlowPrimitive::Integer(x)),
-			domain: FlowType::Integer,
-		}
-		.into(),
-		Procedure { procedure, .. } => FlowTerminator::Jump {
-			continuation_label,
-			argument: FlowOperand::Constant(FlowPrimitive::Procedure(procedure)),
-			domain: FlowType::Procedure,
 		}
 		.into(),
 		Name(ty, argument) => FlowTerminator::Jump {
@@ -755,6 +736,14 @@ fn sequentialize_tail_term(
 	}
 }
 
+fn sequentialize_primitive(primitive: JunePrimitive) -> FlowPrimitive {
+	match primitive {
+		JunePrimitive::Polarity(x) => FlowPrimitive::Polarity(x),
+		JunePrimitive::Integer(x) => FlowPrimitive::Integer(x),
+		JunePrimitive::Procedure { procedure, .. } => FlowPrimitive::Procedure(procedure),
+	}
+}
+
 #[derive(Clone)]
 struct LoopStack {
 	stepper_and_emitter_stack: Vec<(Label, Option<Label>)>,
@@ -783,7 +772,7 @@ impl LoopStack {
 	}
 }
 
-struct Substitution(HashMap<Label, FlowOperand>);
+struct Substitution(HashMap<Label, FlowProjection>);
 
 trait Substitute {
 	fn apply(&mut self, substitution: &Substitution);
@@ -797,19 +786,21 @@ trait Substitute {
 	}
 }
 
+impl Substitute for FlowProjection {
+	fn apply(&mut self, substitution: &Substitution) {
+		if let FlowVariable::Local(local) = self.root {
+			if let Some(mut substituend) = substitution.0.get(&local).cloned() {
+				substituend.projectors.append(&mut self.projectors);
+				*self = substituend;
+			}
+		}
+	}
+}
+
 impl Substitute for FlowOperand {
 	fn apply(&mut self, substitution: &Substitution) {
 		match self {
-			FlowOperand::Copy(projection) => {
-				if let FlowVariable::Local(local) = projection.root {
-					if let Some(mut substituend) = substitution.0.get(&local).cloned() {
-						for projector in &projection.projectors {
-							substituend = substituend.project(projector.clone());
-						}
-						*self = substituend;
-					}
-				}
-			},
+			FlowOperand::Copy(projection) => projection.apply(substitution),
 			FlowOperand::Constant(_) => (),
 		}
 	}
@@ -829,56 +820,32 @@ impl Substitute for FlowOperation {
 	}
 }
 
-impl core::ops::Mul<Self> for Substitution {
-	type Output = Self;
-
-	fn mul(mut self, other: Self) -> Self::Output {
-		for substituend in self.0.values_mut() {
-			substituend.apply(&other)
-		}
-
-		for (replacee, substituend) in other.0 {
-			self.0.entry(replacee).or_insert(substituend);
-		}
-
-		self
-	}
-}
-
 impl Substitute for FlowTerm {
 	fn apply(&mut self, substitution: &Substitution) {
 		for statement in &mut self.statements {
 			match statement {
-				FlowStatement::Assign { binding: _, operation } => operation.apply(substitution),
+				FlowStatement::Copy { projections } => {
+					for projection in projections {
+						projection.apply(substitution);
+					}
+				},
+				// Drops should only occur for bound assignees, which are also fresh anyway.
+				FlowStatement::Drop { .. } => (),
+				FlowStatement::Assign { operation, .. } => operation.apply(substitution),
 				// Because every parameter is fresh, we are not concerned about shadowing.
-				FlowStatement::DeclareContinuation {
-					label: _,
-					parameter: _,
-					domain: _,
-					body,
-				} => body.apply(substitution),
+				FlowStatement::DeclareContinuation { body, .. } => body.apply(substitution),
 			}
 		}
 
 		match &mut self.terminator {
-			FlowTerminator::Branch {
-				scrutinee,
-				yes_continuation: _,
-				no_continuation: _,
-			} => scrutinee.apply(substitution),
+			FlowTerminator::Branch { scrutinee, .. } => scrutinee.apply(substitution),
 			FlowTerminator::Apply {
 				procedure,
-				domain: _,
-				codomain: _,
 				snapshot,
-				continuation_label: _,
 				argument,
+				..
 			} => [procedure, snapshot, argument].map(|x| x.apply(substitution)).ignore(),
-			FlowTerminator::Jump {
-				continuation_label: _,
-				domain: _,
-				argument,
-			} => argument.apply(substitution),
+			FlowTerminator::Jump { argument, .. } => argument.apply(substitution),
 		}
 	}
 }

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::label::{Label, LabelGenerator};
 use crate::interpreter::{
 	base::{BaseIntrinsic, BaseTerm, BaseType, BaseVariable},
-	june::{JuneIntrinsic, JuneProcedure, JuneProgram, JuneTerm, JuneType},
+	june::{JuneIntrinsic, JunePrimitive, JuneProcedure, JuneProgram, JuneTerm, JuneType},
 };
 
 pub fn hoist(term: BaseTerm, mut symbol_generator: LabelGenerator) -> JuneProgram {
@@ -34,8 +34,8 @@ fn hoist_term(
 	symbol_generator: &mut LabelGenerator,
 ) -> JuneTerm {
 	match term {
-		BaseTerm::Polarity(x) => JuneTerm::Polarity(x),
-		BaseTerm::Integer(x) => JuneTerm::Integer(x),
+		BaseTerm::Polarity(x) => JuneTerm::Primitive(JunePrimitive::Polarity(x)),
+		BaseTerm::Integer(x) => JuneTerm::Primitive(JunePrimitive::Integer(x)),
 		BaseTerm::Name(ty, name) => JuneTerm::Name(hoist_ty(ty), name),
 		BaseTerm::Tuple(typed_fields) => JuneTerm::Tuple(
 			typed_fields
@@ -298,7 +298,7 @@ struct Substitution(HashMap<Label, JuneTerm>);
 fn substitute(term: &mut JuneTerm, substitution: &Substitution) {
 	use JuneTerm::*;
 	match term {
-		Polarity(_) | Integer(_) | Procedure { .. } => (),
+		Primitive(_) => (),
 		Name(_, variable) => match variable {
 			BaseVariable::Auto(name) => {
 				if let Some(new_term) = substitution.0.get(name) {

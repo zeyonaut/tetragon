@@ -80,6 +80,7 @@ pub enum NASMInstruction {
 	MovFromLabel(NASMRegister64, String),
 	MovFromU64(NASMRegister64, u64),
 	MovFromI64(NASMRegister64, i64),
+	LEA(NASMRegister64, (NASMRegister64, i32)),
 	MovFromAddress(NASMRegister64, (NASMRegister64, i32)),
 	MovIntoAddressFromReg((NASMRegister64, i32), NASMRegister64),
 	MovIntoAddressFromU64((NASMRegister64, i32), u64),
@@ -120,6 +121,7 @@ impl NASMInstruction {
 			MovFromLabel(reg, label) => format!("mov {reg}, {label}"),
 			MovFromU64(reg, imm) => format!("mov {reg}, {imm}"),
 			MovFromI64(reg, imm) => format!("mov {reg}, {imm}"),
+			LEA(dst, (src, offset)) => format!("lea {dst}, [{src} + {offset}]"),
 			MovFromAddress(dst, (src, offset)) => format!("mov {dst}, [{src} + {offset}]"),
 			MovIntoAddressFromReg((dst, offset), src) => format!("mov [{dst} + {offset}], {src}"),
 			MovIntoAddressFromU64((dst, offset), imm) => format!("mov qword [{dst} + {offset}], {imm}"),
@@ -388,14 +390,9 @@ impl StackFrame {
 				}
 
 				if IS_BY_VALUE {
-					instructions.push(MovFromAddress(destination, (source, offset)))
+					instructions.push(MovFromAddress(destination, (source, offset)));
 				} else {
-					if destination != source {
-						instructions.push(MovFromReg(destination, source));
-					}
-					if offset != 0 {
-						instructions.push(AddFromI32(destination, offset));
-					}
+					instructions.push(LEA(destination, (source, offset)));
 				}
 			},
 			FlowVariable::Global(_) => unimplemented!(),
@@ -519,11 +516,7 @@ pub fn emit_main(entry: Label, codomain: FlowType, globals: &mut HashMap<String,
 	];
 
 	if codomain_size > 8 {
-		instructions.extend([
-			MovFromReg(R8, RBP),
-			AddFromI32(R8, return_offset),
-			CallLabel(emit_procedure_label(entry)),
-		]);
+		instructions.extend([LEA(R8, (RBP, return_offset)), CallLabel(emit_procedure_label(entry))]);
 	} else if codomain_size > 0 {
 		instructions.extend([
 			CallLabel(emit_procedure_label(entry)),
@@ -733,7 +726,7 @@ pub fn emit_procedure(
 			Some(stack_frame.allocate(
 				capture_parameter.clone(),
 				FlowType::Snapshot(Some(capture_requisites.clone())),
-				true,
+				false,
 			))
 		}
 	} else {
@@ -856,6 +849,8 @@ pub fn emit_statement(
 	use NASMRegister64::*;
 	use NASMRegister8::*;
 	match statement {
+		FlowStatement::Copy { projections } => unimplemented!(),
+		FlowStatement::Drop { assignees } => unimplemented!(),
 		FlowStatement::Assign { binding, operation } => match operation {
 			FlowOperation::Id(ty, operand) => {
 				stack_frame.emit_clones(symbol_generator, operand, instructions);
@@ -871,12 +866,7 @@ pub fn emit_statement(
 							instructions.push(MovIntoAddressFromReg((RBP, var), RAX));
 						} else {
 							stack_frame.emit_load::<false>(RSI, projection, instructions);
-							instructions.extend([
-								MovFromReg(RDI, RBP),
-								AddFromI32(RDI, var),
-								MovFromU64(RCX, u64::from(size) / 8),
-								RepMovsq,
-							]);
+							instructions.extend([LEA(RDI, (RBP, var)), MovFromU64(RCX, u64::from(size) / 8), RepMovsq]);
 						}
 					},
 					FlowOperand::Constant(primitive) => match primitive {
@@ -990,8 +980,7 @@ pub fn emit_statement(
 							} else {
 								stack_frame.emit_load::<false>(RSI, projection, instructions);
 								instructions.extend([
-									MovFromReg(RDI, RBP),
-									AddFromI32(RDI, var + pigeonhole),
+									LEA(RDI, (RBP, var + pigeonhole)),
 									MovFromU64(RCX, u64::from(size) / 8),
 									RepMovsq,
 								]);
@@ -1086,8 +1075,7 @@ pub fn emit_statement(
 								} else {
 									stack_frame.emit_load::<false>(RSI, projection, instructions);
 									instructions.extend([
-										MovFromReg(RDI, RAX),
-										AddFromI32(RDI, capture_offset),
+										LEA(RDI, (RAX, capture_offset)),
 										MovFromU64(RCX, u64::from(size) / 8),
 										RepMovsq,
 									]);
@@ -1230,7 +1218,7 @@ pub fn emit_terminator(
 
 			if codomain_size > 8 {
 				if let Some((_, phi_buffer_offset)) = phi_buffer {
-					instructions.extend([MovFromReg(R8, RBP), AddFromI32(R8, phi_buffer_offset)])
+					instructions.push(LEA(R8, (RBP, phi_buffer_offset)));
 				} else if let Some(mailbox_offset) = mailbox_offset {
 					instructions.push(MovFromAddress(R8, (RBP, mailbox_offset)));
 				} else {
@@ -1275,8 +1263,7 @@ pub fn emit_terminator(
 					} else {
 						stack_frame.emit_load::<false>(RSI, &phi_buffer_projection, instructions);
 						instructions.extend([
-							MovFromReg(RDI, RBP),
-							AddFromI32(RDI, continuation_parameter_offset),
+							LEA(RDI, (RBP, continuation_parameter_offset)),
 							MovFromU64(RCX, u64::from(codomain_size) / 8),
 							RepMovsq,
 						]);
@@ -1357,8 +1344,7 @@ pub fn emit_terminator(
 							} else {
 								stack_frame.emit_load::<false>(RSI, projection, instructions);
 								instructions.extend([
-									MovFromReg(RDI, RBP),
-									AddFromI32(RDI, phi_buffer_offset),
+									LEA(RDI, (RBP, phi_buffer_offset)),
 									MovFromU64(RCX, u64::from(size) / 8),
 									RepMovsq,
 								]);
@@ -1380,12 +1366,7 @@ pub fn emit_terminator(
 							instructions.push(MovIntoAddressFromReg((RBP, parameter), RAX));
 						} else {
 							stack_frame.emit_load::<false>(RSI, &projection, instructions);
-							instructions.extend([
-								MovFromReg(RDI, RBP),
-								AddFromI32(RDI, parameter),
-								MovFromU64(RCX, u64::from(size) / 8),
-								RepMovsq,
-							]);
+							instructions.extend([LEA(RDI, (RBP, parameter)), MovFromU64(RCX, u64::from(size) / 8), RepMovsq]);
 						}
 
 						instructions.push(Jmp(emit_block_local_label(continuation_label.clone())));

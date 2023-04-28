@@ -177,6 +177,12 @@ pub enum FlowStatement {
 		domain: FlowType,
 		body: FlowTerm,
 	},
+	Copy {
+		projections: Vec<FlowProjection>,
+	},
+	Drop {
+		assignees: Vec<Label>,
+	},
 }
 
 impl FlowStatement {
@@ -288,6 +294,7 @@ impl FlowProgram {
 							body,
 						});
 					},
+					_ => unimplemented!(),
 				}
 			}
 
@@ -534,4 +541,96 @@ fn compute(
 		FlowOperand::Copy(projection) => lookup(intrinsics, environment, &projection),
 		FlowOperand::Constant(primitive) => Some(primitive.evaluate()),
 	}
+}
+
+pub fn pretty_print_program(program: &FlowProgram) -> String {
+	let mut string = String::new();
+	for (label, procedure) in &program.procedures {
+		string.push_str(
+			format!(
+				"proc ${} (${}) [${}]:\n",
+				label.handle(),
+				if let Some(p) = procedure.parameter {
+					p.handle().to_string()
+				} else {
+					"".to_string()
+				},
+				if let Some((p, _)) = procedure.capture {
+					p.handle().to_string()
+				} else {
+					"".to_string()
+				}
+			)
+			.as_ref(),
+		);
+		let lines = pretty_print_term(&procedure.body);
+		for line in lines {
+			string.push_str(format!("\t{line}\n").as_ref());
+		}
+		string.push('\n');
+	}
+	string
+}
+
+fn pretty_print_term(term: &FlowTerm) -> Vec<String> {
+	let mut lines = Vec::new();
+	for statement in &term.statements {
+		match statement {
+			FlowStatement::Assign { binding, operation } => lines.push(format!("assign ${} to ...", binding.handle())),
+			FlowStatement::DeclareContinuation {
+				label,
+				parameter,
+				domain,
+				body,
+			} => {
+				lines.push(format!("cont ${} (${}):", label.handle(), parameter.handle()));
+				let body_lines = pretty_print_term(body);
+				for body_line in body_lines {
+					lines.push(format!("\t{body_line}"));
+				}
+			},
+			FlowStatement::Copy { projections } => {
+				let mut line = "copy".to_string();
+				lines.push(line);
+			},
+			FlowStatement::Drop {
+				assignees: assignee_stack,
+			} => {
+				let mut line = "drop".to_string();
+				for assignee in assignee_stack {
+					line.push(' ');
+					line.push_str(assignee.handle().to_string().as_ref());
+				}
+				lines.push(line);
+			},
+		}
+	}
+	match &term.terminator {
+		FlowTerminator::Branch {
+			scrutinee,
+			yes_continuation,
+			no_continuation,
+		} => lines.push(format!(
+			"branch y:${} n:${}",
+			yes_continuation.handle(),
+			no_continuation.handle()
+		)),
+		FlowTerminator::Apply {
+			procedure,
+			domain,
+			codomain,
+			snapshot,
+			continuation_label,
+			argument,
+		} => lines.push(format!(
+			"call ... with ... ret:${:?}",
+			continuation_label.as_ref().map(Label::handle)
+		)),
+		FlowTerminator::Jump {
+			continuation_label,
+			domain,
+			argument,
+		} => lines.push(format!("jump ${:?} with ...", continuation_label.as_ref().map(Label::handle))),
+	}
+	lines
 }

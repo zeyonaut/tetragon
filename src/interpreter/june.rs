@@ -35,16 +35,34 @@ pub enum JuneIntrinsic {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum JuneTerm {
+pub enum JunePrimitive {
 	Polarity(bool),
 	Integer(i64),
-	Name(JuneType, BaseVariable),
-	Tuple(Vec<(JuneType, Self)>),
 	Procedure {
 		domain: JuneType,
 		codomain: JuneType,
 		procedure: Label,
 	},
+}
+
+impl JunePrimitive {
+	pub fn ty(&self) -> JuneType {
+		match self {
+			JunePrimitive::Polarity(_) => JuneType::Polarity,
+			JunePrimitive::Integer(_) => JuneType::Integer,
+			JunePrimitive::Procedure { domain, codomain, .. } => JuneType::Procedure {
+				domain: Box::new(domain.clone()),
+				codomain: Box::new(codomain.clone()),
+			},
+		}
+	}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JuneTerm {
+	Primitive(JunePrimitive),
+	Name(JuneType, BaseVariable),
+	Tuple(Vec<(JuneType, Self)>),
 	Projection {
 		ty: JuneType,
 		tuple: Box<Self>,
@@ -107,12 +125,7 @@ impl JuneTerm {
 	pub fn ty(&self) -> JuneType {
 		use JuneType::*;
 		match self {
-			Self::Polarity(_) => Polarity,
-			Self::Integer(_) => Integer,
-			Self::Procedure { domain, codomain, .. } => Procedure {
-				domain: Box::new(domain.clone()),
-				codomain: Box::new(codomain.clone()),
-			},
+			Self::Primitive(primitive) => primitive.ty(),
 			Self::Name(ty, _) => ty.clone(),
 			Self::Tuple(typed_terms) => Product(typed_terms.iter().map(|(ty, _)| ty).cloned().collect()),
 			Self::Projection { ty, .. } => ty.clone(),
